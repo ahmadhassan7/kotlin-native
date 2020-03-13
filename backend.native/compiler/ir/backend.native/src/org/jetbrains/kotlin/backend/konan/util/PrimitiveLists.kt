@@ -5,16 +5,6 @@
 
 package org.jetbrains.kotlin.backend.konan.util
 
-import sun.misc.Unsafe
-
-private val theUnsafe = Unsafe::class.java.getDeclaredField("theUnsafe").let {
-    it.isAccessible = true
-    it.get(null) as Unsafe
-}
-
-private val intArrayDataOffset  = theUnsafe.arrayBaseOffset(IntArray::class.java).toLong()
-private val longArrayDataOffset  = theUnsafe.arrayBaseOffset(LongArray::class.java).toLong()
-
 class IntArrayList : Iterable<Int> {
     private var array = IntArray(3)
     private var length = 0
@@ -55,9 +45,7 @@ class IntArrayList : Iterable<Int> {
             var newSize = oldArray.size * 3 / 2
             if (minCapacity > newSize)
                 newSize = minCapacity
-            val newArray = IntArray(newSize)
-            theUnsafe.copyMemory(oldArray, intArrayDataOffset, newArray, intArrayDataOffset, oldArray.size.toLong() * 4)
-            array = newArray
+            array = oldArray.copyOf(newSize)
         }
     }
 
@@ -67,7 +55,6 @@ class IntArrayList : Iterable<Int> {
         override fun hasNext() = index < size
 
         override fun next() = get(index++)
-
     }
 }
 
@@ -105,9 +92,7 @@ class LongArrayList : Iterable<Long> {
             var newSize = oldArray.size * 3 / 2
             if (minCapacity > newSize)
                 newSize = minCapacity
-            val newArray = LongArray(newSize)
-            theUnsafe.copyMemory(oldArray, longArrayDataOffset, newArray, longArrayDataOffset, oldArray.size.toLong() * 8)
-            array = newArray
+            array = oldArray.copyOf(newSize)
         }
     }
 
@@ -117,6 +102,5 @@ class LongArrayList : Iterable<Long> {
         override fun hasNext() = index < size
 
         override fun next() = get(index++)
-
     }
 }
