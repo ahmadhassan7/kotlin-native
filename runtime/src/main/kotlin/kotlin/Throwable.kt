@@ -6,6 +6,7 @@
 package kotlin
 
 import kotlin.native.concurrent.freeze
+import kotlin.native.concurrent.isFrozen
 import kotlin.native.internal.ExportForCppRuntime
 import kotlin.native.internal.ExportTypeInfo
 import kotlin.native.internal.NativePtrArray
@@ -75,6 +76,8 @@ public open class Throwable(open val message: String?, open val cause: Throwable
         val s = kClass.qualifiedName ?: kClass.simpleName ?: "Throwable"
         return if (message != null) s + ": " + message.toString() else s
     }
+
+    internal var suppressedExceptionsList: MutableList<Throwable>? = null
 }
 
 @SymbolName("Kotlin_getCurrentStackTrace")
@@ -82,3 +85,19 @@ private external fun getCurrentStackTrace(): NativePtrArray
 
 @SymbolName("Kotlin_getStackTraceStrings")
 private external fun getStackTraceStrings(stackTrace: NativePtrArray): Array<String>
+
+
+@SinceKotlin("1.4")
+public actual fun Throwable.addSuppressed(exception: Throwable) {
+    if (this !== exception && !this.isFrozen)
+        initSuppressed().add(exception)
+}
+
+@SinceKotlin("1.4")
+public actual val Throwable.suppressedExceptions: List<Throwable> get() {
+    return this.suppressedExceptionsList ?: emptyList()
+}
+
+private fun Throwable.initSuppressed(): MutableList<Throwable> {
+    return this.suppressedExceptionsList ?: mutableListOf<Throwable>().also { this.suppressedExceptionsList = it }
+}
