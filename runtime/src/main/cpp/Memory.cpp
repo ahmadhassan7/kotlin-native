@@ -417,6 +417,8 @@ struct MemoryState {
   KRef* tlsMapLastStart;
   void* tlsMapLastKey;
 
+  KStdUnorderedSet<uintptr_t> initializingSingletons;
+
 #if USE_GC
   // Finalizer queue - linked list of containers scheduled for finalization.
   ContainerHeader* finalizerQueue;
@@ -1900,7 +1902,8 @@ void updateReturnRef(ObjHeader** returnSlot, const ObjHeader* value) {
   updateStackRef<Strict>(returnSlot, value);
 }
 
-void updateHeapRefIfNull(ObjHeader** location, const ObjHeader* object) {
+bool updateHeapRefIfNull(ObjHeader** location, const ObjHeader* object) {
+  bool result = true;
   if (object != nullptr) {
 #if KONAN_NO_THREADS
     ObjHeader* old = *location;
@@ -1913,11 +1916,13 @@ void updateHeapRefIfNull(ObjHeader** location, const ObjHeader* object) {
     auto old = __sync_val_compare_and_swap(location, nullptr, const_cast<ObjHeader*>(object));
     if (old != nullptr) {
       // Failed to store, was not null.
-     ReleaseHeapRef(const_cast<ObjHeader*>(object));
+      ReleaseHeapRef(const_cast<ObjHeader*>(object));
+      result = false;
     }
 #endif
     UPDATE_REF_EVENT(memoryState, old, object, location, 0);
   }
+  return result;
 }
 
 inline void checkIfGcNeeded(MemoryState* state) {
@@ -1999,7 +2004,7 @@ OBJ_GETTER(initInstance,
 
 template <bool Strict>
 OBJ_GETTER(initSharedInstance,
-    ObjHeader** location, ObjHeader** localLocation, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*)) {
+    ObjHeader** location, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*)) {
 #if KONAN_NO_THREADS
   ObjHeader* value = *location;
   if (value != nullptr) {
@@ -2025,39 +2030,59 @@ OBJ_GETTER(initSharedInstance,
   }
 #endif  // KONAN_NO_EXCEPTIONS
 #else  // KONAN_NO_THREADS
-  ObjHeader* value = *localLocation;
-  if (value != nullptr) RETURN_OBJ(value);
-
-  ObjHeader* initializing = reinterpret_cast<ObjHeader*>(1);
-
-  // Spin lock.
-  while ((value = __sync_val_compare_and_swap(location, nullptr, initializing)) == initializing);
+retry:
+  ObjHeader* value = *location;
   if (value != nullptr) {
-    // OK'ish, inited by someone else.
-    RETURN_OBJ(value);
+    // If there's a frozen value already, just return it.
+    if (isPermanentOrFrozen(value)) {
+      RETURN_OBJ(value);
+    }
+
+    // If the value is being initialized by the current worker, just return it.
+    auto it = memoryState->initializingSingletons.find(reinterpret_cast<uintptr_t>(value));
+    if (it != memoryState->initializingSingletons.end()) {
+      RETURN_OBJ(value);
+    }
+
+    // Spin lock.
+    while (*location && !isPermanentOrFrozen(*location)) {}
+
+    // If location has become empty or frozen, just retry the entire procedure.
+    goto retry;
   }
+
+  // Need to create a new instance.
   ObjHeader* object = AllocInstance(typeInfo, OBJ_RESULT);
-  UpdateHeapRef(localLocation, object);
+  // If someone else managed to publish an instance, discard ours, and retry the entire procedure.
+  if (!UpdateHeapRefIfNull(location, object))
+    goto retry;
+
+  // Remember that current worker is in charge of initialization.
+  auto it = memoryState->initializingSingletons.insert(reinterpret_cast<uintptr_t>(object));
+  RuntimeCheck(it.second, "object cannot be assigned twice into initializingSingletons");
+
 #if KONAN_NO_EXCEPTIONS
   ctor(object);
   if (Strict)
     FreezeSubgraph(object);
-  UpdateHeapRef(location, object);
   synchronize();
+  // After freezing, we can forget value's initializer.
+  memoryState->initializingSingletons.erase(it.first);
   return object;
 #else  // KONAN_NO_EXCEPTIONS
   try {
     ctor(object);
     if (Strict)
       FreezeSubgraph(object);
-    UpdateHeapRef(location, object);
     synchronize();
+    // After freezing, we can forget value's initializer.
+    memoryState->initializingSingletons.erase(it.first);
     return object;
   } catch (...) {
     UpdateReturnRef(OBJ_RESULT, nullptr);
     zeroHeapRef(location);
-    zeroHeapRef(localLocation);
     synchronize();
+    memoryState->initializingSingletons.erase(it.first);
     throw;
   }
 #endif  // KONAN_NO_EXCEPTIONS
@@ -2803,12 +2828,12 @@ OBJ_GETTER(InitInstanceRelaxed,
 }
 
 OBJ_GETTER(InitSharedInstanceStrict,
-    ObjHeader** location, ObjHeader** localLocation, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*)) {
-  RETURN_RESULT_OF(initSharedInstance<true>, location, localLocation, typeInfo, ctor);
+    ObjHeader** location, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*)) {
+  RETURN_RESULT_OF(initSharedInstance<true>, location, typeInfo, ctor);
 }
 OBJ_GETTER(InitSharedInstanceRelaxed,
-    ObjHeader** location, ObjHeader** localLocation, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*)) {
-  RETURN_RESULT_OF(initSharedInstance<false>, location, localLocation, typeInfo, ctor);
+    ObjHeader** location, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*)) {
+  RETURN_RESULT_OF(initSharedInstance<false>, location, typeInfo, ctor);
 }
 
 void SetStackRefStrict(ObjHeader** location, const ObjHeader* object) {
@@ -2857,8 +2882,8 @@ void UpdateReturnRefRelaxed(ObjHeader** returnSlot, const ObjHeader* value) {
   updateReturnRef<false>(returnSlot, value);
 }
 
-void UpdateHeapRefIfNull(ObjHeader** location, const ObjHeader* object) {
-  updateHeapRefIfNull(location, object);
+bool UpdateHeapRefIfNull(ObjHeader** location, const ObjHeader* object) {
+  return updateHeapRefIfNull(location, object);
 }
 
 OBJ_GETTER(SwapHeapRefLocked,

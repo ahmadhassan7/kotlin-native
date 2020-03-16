@@ -461,11 +461,11 @@ OBJ_GETTER(InitInstance,
     ObjHeader** location, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*));
 
 OBJ_GETTER(InitSharedInstanceStrict,
-    ObjHeader** location, ObjHeader** localLocation, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*));
+    ObjHeader** location, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*));
 OBJ_GETTER(InitSharedInstanceRelaxed,
-    ObjHeader** location, ObjHeader** localLocation, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*));
+    ObjHeader** location, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*));
 OBJ_GETTER(InitSharedInstance,
-    ObjHeader** location, ObjHeader** localLocation, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*));
+    ObjHeader** location, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*));
 
 // Weak reference operations.
 // Atomically clears counter object reference.
@@ -509,7 +509,7 @@ MODEL_VARIANTS(void, UpdateStackRef, ObjHeader** location, const ObjHeader* obje
 // Updates heap/static data location.
 MODEL_VARIANTS(void, UpdateHeapRef, ObjHeader** location, const ObjHeader* object);
 // Updates location if it is null, atomically.
-MODEL_VARIANTS(void, UpdateHeapRefIfNull, ObjHeader** location, const ObjHeader* object);
+bool UpdateHeapRefIfNull(ObjHeader** location, const ObjHeader* object) RUNTIME_NOTHROW;
 // Updates reference in return slot.
 MODEL_VARIANTS(void, UpdateReturnRef, ObjHeader** returnSlot, const ObjHeader* object);
 // Compares and swaps reference with taken lock.

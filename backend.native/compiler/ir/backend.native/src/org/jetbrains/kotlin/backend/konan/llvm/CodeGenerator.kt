@@ -921,39 +921,24 @@ internal class FunctionGenerationContext(val function: LLVMValueRef,
         }
         val singleton = context.llvmDeclarations.forSingleton(irClass)
         val instanceAddress = singleton.instanceStorage
-        val instanceShadowAddress = singleton.instanceShadowStorage
 
         if (storageKind == ObjectStorageKind.PERMANENT) {
             return loadSlot(instanceAddress.getAddress(this), false)
         }
         val objectPtr = instanceAddress.getAddress(this)
-        val bbInit = basicBlock("label_init", startLocationInfo, endLocationInfo)
-        val bbExit = basicBlock("label_continue", startLocationInfo, endLocationInfo)
-        val objectVal = loadSlot(objectPtr, false)
-        val objectInitialized = icmpUGt(ptrToInt(objectVal, codegen.intPtrType), codegen.immOneIntPtrType)
-        val bbCurrent = currentBlock
-        condBr(objectInitialized, bbExit, bbInit)
 
-        positionAtEnd(bbInit)
         val typeInfo = codegen.typeInfoForAllocation(irClass)
         val defaultConstructor = irClass.constructors.single { it.valueParameters.size == 0 }
         val ctor = codegen.llvmFunction(defaultConstructor)
-        val (initFunction, args) =
+        val initFunction =
                 if (storageKind == ObjectStorageKind.SHARED && context.config.threadsAreAllowed) {
-                    val shadowObjectPtr = instanceShadowAddress!!.getAddress(this)
-                    context.llvm.initSharedInstanceFunction to listOf(objectPtr, shadowObjectPtr, typeInfo, ctor)
+                    context.llvm.initSharedInstanceFunction
                 } else {
-                    context.llvm.initInstanceFunction to listOf(objectPtr, typeInfo, ctor)
+                    context.llvm.initInstanceFunction
                 }
-        val newValue = call(initFunction, args, Lifetime.GLOBAL, exceptionHandler)
-        val bbInitResult = currentBlock
-        br(bbExit)
 
-        positionAtEnd(bbExit)
-        val valuePhi = phi(codegen.getLLVMType(irClass.defaultType))
-        addPhiIncoming(valuePhi, bbCurrent to objectVal, bbInitResult to newValue)
-
-        return valuePhi
+        // TODO: Inline objectPtr check.
+        return call(initFunction, listOf(objectPtr, typeInfo, ctor), Lifetime.GLOBAL, exceptionHandler)
     }
 
     /**

@@ -67,7 +67,7 @@ internal class ClassLlvmDeclarations(
         val singletonDeclarations: SingletonLlvmDeclarations?,
         val objCDeclarations: KotlinObjCClassLlvmDeclarations?)
 
-internal class SingletonLlvmDeclarations(val instanceStorage: AddressAccess, val instanceShadowStorage: AddressAccess?)
+internal class SingletonLlvmDeclarations(val instanceStorage: AddressAccess)
 
 internal class KotlinObjCClassLlvmDeclarations(
         val classPointerGlobal: StaticData.Global,
@@ -267,24 +267,12 @@ private class DeclarationsGeneratorVisitor(override val context: Context) :
             return null
         }
 
-        val isExported = irClass.isExported()
-        val valueGetterName = if (isExported) {
-            irClass.objectInstanceGetterSymbolName
-        } else {
-            null
-        }
-
         val storageKind = irClass.storageKind(context)
         val threadLocal = storageKind == ObjectStorageKind.THREAD_LOCAL
         val symbolName = "kobjref:" + qualifyInternalName(irClass)
         val instanceAddress = addKotlinGlobal(symbolName, getLLVMType(irClass.defaultType), threadLocal = threadLocal)
 
-        val instanceShadowAddress = if (threadLocal || storageKind == ObjectStorageKind.PERMANENT) null else {
-            val shadowSymbolName = "kshadowobjref:" + qualifyInternalName(irClass)
-            addKotlinGlobal(shadowSymbolName, getLLVMType(irClass.defaultType), threadLocal = true)
-        }
-
-        return SingletonLlvmDeclarations(instanceAddress, instanceShadowAddress)
+        return SingletonLlvmDeclarations(instanceAddress)
     }
 
     private fun createKotlinObjCClassDeclarations(irClass: IrClass): KotlinObjCClassLlvmDeclarations {
