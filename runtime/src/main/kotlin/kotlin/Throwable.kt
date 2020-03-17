@@ -45,32 +45,43 @@ public open class Throwable(open val message: String?, open val cause: Throwable
     /**
      * Prints the stack trace of this throwable to the standard output.
      */
-    public fun printStackTrace(): Unit = dumpStackTrace { println(it) }
+    public fun printStackTrace(): Unit = dumpStackTrace("", "") { println(it) }
 
     internal fun dumpStackTrace(): String = buildString {
-        dumpStackTrace { appendln(it) }
+        dumpStackTrace("", "") { appendln(it) }
     }
 
-    private inline fun writeStackTraceElements(throwable: Throwable, writeln: (String) -> Unit) {
-        for (element in throwable.stackTraceStrings) {
-            writeln("        at $element")
-        }
-    }
-
-    private inline fun dumpStackTrace(crossinline writeln: (String) -> Unit) {
-        writeln(this@Throwable.toString())
-
-        writeStackTraceElements(this, writeln)
+    private fun Throwable.dumpStackTrace(indent: String, qualifier: String, writeln: (String) -> Unit) {
+        this.dumpSelfTrace(indent, qualifier, writeln)
 
         var cause = this.cause
         while (cause != null) {
             // TODO: should skip common stack frames
-            writeln("Caused by: $cause")
-            writeStackTraceElements(cause, writeln)
+            cause.dumpSelfTrace(indent, "Caused by: ", writeln)
             cause = cause.cause
         }
     }
 
+    private fun Throwable.dumpSelfTrace(indent: String, qualifier: String, writeln: (String) -> Unit) {
+        writeln(indent + qualifier + this.toString())
+        for (element in stackTraceStrings) {
+            writeln("$indent\tat $element")
+        }
+        val suppressed = suppressedExceptionsList
+        if (!suppressed.isNullOrEmpty()) {
+            val suppressedIndent = indent + '\t'
+            for (s in suppressed) {
+                s.dumpStackTrace(suppressedIndent, "Suppressed: ", writeln)
+            }
+        }
+    }
+
+
+    /**
+     * Returns a short description of this throwable consisting of
+     * the exception class name (fully qualified if possible)
+     * followed by the exception message if it is not null.
+     */
     public override fun toString(): String {
         val kClass = this::class
         val s = kClass.qualifiedName ?: kClass.simpleName ?: "Throwable"
@@ -86,6 +97,13 @@ private external fun getCurrentStackTrace(): NativePtrArray
 @SymbolName("Kotlin_getStackTraceStrings")
 private external fun getStackTraceStrings(stackTrace: NativePtrArray): Array<String>
 
+/**
+ * Returns a short description of this throwable with the complete back trace.
+ *
+ * The back trace includes the stack frames ...
+ */
+@SinceKotlin("1.4")
+public fun Throwable.toStringWithTrace(): String = dumpStackTrace()
 
 /**
  * Adds the specified exception to the list of exceptions that were

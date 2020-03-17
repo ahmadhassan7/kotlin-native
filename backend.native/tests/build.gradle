@@ -2286,6 +2286,13 @@ standaloneTest("check_stacktrace_format") {
     source = "runtime/exceptions/check_stacktrace_format.kt"
 }
 
+standaloneTest("check_trace_structure") {
+    disabled = project.globalTestArgs.contains('-opt') || (project.testTarget == 'ios_arm64') || (project.testTarget == 'wasm32')
+    goldValue = "OK\n"
+    flags = ['-g']
+    source = "runtime/exceptions/check_trace_structure.kt"
+}
+
 standaloneTest("custom_hook") {
     enabled = (project.testTarget != 'wasm32') // Uses exceptions.
     goldValue = "value 42: Error\n"
