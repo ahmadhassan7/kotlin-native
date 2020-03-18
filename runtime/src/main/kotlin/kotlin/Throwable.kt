@@ -43,7 +43,7 @@ public open class Throwable(open val message: String?, open val cause: Throwable
             (0 until stackTrace.size).map { index -> stackTrace[index].toLong() }
 
     /**
-     * Prints the stack trace of this throwable to the standard output.
+     * Prints the [detailed description][Throwable.toStringWithTrace] of this throwable to the standard output.
      */
     public fun printStackTrace(): Unit = dumpStackTrace("", "") { println(it) }
 
@@ -78,7 +78,7 @@ public open class Throwable(open val message: String?, open val cause: Throwable
 
 
     /**
-     * Returns a short description of this throwable consisting of
+     * Returns the short description of this throwable consisting of
      * the exception class name (fully qualified if possible)
      * followed by the exception message if it is not null.
      */
@@ -98,12 +98,16 @@ private external fun getCurrentStackTrace(): NativePtrArray
 private external fun getStackTraceStrings(stackTrace: NativePtrArray): Array<String>
 
 /**
- * Returns a short description of this throwable with the complete back trace.
+ * Returns the detailed description of this throwable with its stack trace.
  *
- * The back trace includes the stack frames ...
+ * The detailed description includes:
+ * - the short description (see [Throwable.toString]) of this throwable;
+ * - the complete stack trace;
+ * - detailed descriptions of the exceptions that were [suppressed][suppressedExceptions] in order to deliver this exception;
+ * - the detailed description of each throwable in the [Throwable.cause] chain.
  */
 @SinceKotlin("1.4")
-public fun Throwable.toStringWithTrace(): String = dumpStackTrace()
+public actual fun Throwable.toStringWithTrace(): String = dumpStackTrace()
 
 /**
  * Adds the specified exception to the list of exceptions that were
