@@ -9,7 +9,11 @@ import org.jetbrains.kotlin.konan.target.Configurables
 import org.jetbrains.kotlin.konan.target.KonanTarget
 import org.jetbrains.kotlin.konan.target.ZephyrConfigurables
 
+private var initialized = false
+
 private fun initializeLlvmGlobalPassRegistry() {
+    if (initialized) return
+    initialized = true
     val passRegistry = LLVMGetGlobalPassRegistry()
 
     LLVMInitializeCore(passRegistry)
@@ -142,7 +146,10 @@ private class LlvmPipelineConfiguration(context: Context) {
     }
 }
 
-internal fun runLlvmOptimizationPipeline(context: Context) {
+// LLVM uses static globals inside passes managing pipeline - so synchronize just in case.
+private val lockObject = Any()
+
+internal fun runLlvmOptimizationPipeline(context: Context) = synchronized(lockObject) {
     val llvmModule = context.llvmModule!!
     val config = LlvmPipelineConfiguration(context)
 
