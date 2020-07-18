@@ -6,7 +6,6 @@
 package org.jetbrains.kotlin.backend.konan
 
 import llvm.*
-import org.jetbrains.kotlin.backend.common.DumpIrTreeWithDescriptorsVisitor
 import org.jetbrains.kotlin.backend.konan.descriptors.*
 import org.jetbrains.kotlin.backend.konan.ir.KonanIr
 import org.jetbrains.kotlin.library.SerializedMetadata
@@ -21,11 +20,9 @@ import org.jetbrains.kotlin.descriptors.impl.PropertyDescriptorImpl
 import org.jetbrains.kotlin.descriptors.impl.ReceiverParameterDescriptorImpl
 import org.jetbrains.kotlin.incremental.components.NoLookupLocation
 import org.jetbrains.kotlin.ir.IrElement
-import org.jetbrains.kotlin.ir.SourceManager
 import org.jetbrains.kotlin.ir.declarations.*
 import org.jetbrains.kotlin.ir.declarations.impl.IrFieldImpl
 import org.jetbrains.kotlin.ir.declarations.impl.IrFunctionImpl
-import org.jetbrains.kotlin.ir.declarations.impl.IrTypeParameterImpl
 import org.jetbrains.kotlin.ir.util.*
 import org.jetbrains.kotlin.ir.visitors.IrElementVisitor
 import org.jetbrains.kotlin.ir.visitors.IrElementVisitorVoid
@@ -48,12 +45,12 @@ import org.jetbrains.kotlin.backend.common.ir.copyToWithoutSuperTypes
 import org.jetbrains.kotlin.backend.konan.objcexport.ObjCExport
 import org.jetbrains.kotlin.backend.konan.llvm.coverage.CoverageManager
 import org.jetbrains.kotlin.ir.descriptors.WrappedSimpleFunctionDescriptor
-import org.jetbrains.kotlin.ir.descriptors.WrappedTypeParameterDescriptor
 import org.jetbrains.kotlin.ir.symbols.IrSymbol
-import org.jetbrains.kotlin.ir.symbols.impl.IrTypeParameterSymbolImpl
+import org.jetbrains.kotlin.ir.symbols.impl.IrFieldSymbolImpl
 import org.jetbrains.kotlin.name.FqName
 import org.jetbrains.kotlin.konan.library.KonanLibraryLayout
 import org.jetbrains.kotlin.library.SerializedIrModule
+import org.jetbrains.kotlin.resolve.descriptorUtil.isEffectivelyExternal
 
 /**
  * Offset for synthetic elements created by lowerings and not attributable to other places in the source code.
@@ -61,17 +58,19 @@ import org.jetbrains.kotlin.library.SerializedIrModule
 
 internal class SpecialDeclarationsFactory(val context: Context) {
     private val enumSpecialDeclarationsFactory by lazy { EnumSpecialDeclarationsFactory(context) }
-    private val outerThisFields = mutableMapOf<ClassDescriptor, IrField>()
+    private val outerThisFields = mutableMapOf<IrClass, IrField>()
     private val bridgesDescriptors = mutableMapOf<Pair<IrSimpleFunction, BridgeDirections>, IrSimpleFunction>()
     private val loweredEnums = mutableMapOf<IrClass, LoweredEnum>()
     private val ordinals = mutableMapOf<ClassDescriptor, Map<ClassDescriptor, Int>>()
+
+    val loweredInlineFunctions = mutableSetOf<IrFunction>()
 
     object DECLARATION_ORIGIN_FIELD_FOR_OUTER_THIS :
             IrDeclarationOriginImpl("FIELD_FOR_OUTER_THIS")
 
     fun getOuterThisField(innerClass: IrClass): IrField =
-        if (!innerClass.descriptor.isInner) throw AssertionError("Class is not inner: ${innerClass.descriptor}")
-        else outerThisFields.getOrPut(innerClass.descriptor) {
+        if (!innerClass.isInner) throw AssertionError("Class is not inner: ${innerClass.descriptor}")
+        else outerThisFields.getOrPut(innerClass) {
             val outerClass = innerClass.parent as? IrClass
                     ?: throw AssertionError("No containing class for inner class ${innerClass.descriptor}")
 
@@ -90,11 +89,16 @@ internal class SpecialDeclarationsFactory(val context: Context) {
             }
 
             IrFieldImpl(
-                    innerClass.startOffset,
-                    innerClass.endOffset,
-                    DECLARATION_ORIGIN_FIELD_FOR_OUTER_THIS,
-                    descriptor,
-                    outerClass.defaultType
+                    startOffset = innerClass.startOffset,
+                    endOffset = innerClass.endOffset,
+                    origin = DECLARATION_ORIGIN_FIELD_FOR_OUTER_THIS,
+                    symbol = IrFieldSymbolImpl(descriptor),
+                    name = descriptor.name,
+                    type = outerClass.defaultType,
+                    visibility = descriptor.visibility,
+                    isFinal = !descriptor.isVar,
+                    isExternal = descriptor.isEffectivelyExternal(),
+                    isStatic = descriptor.dispatchReceiverParameter == null
             ).apply {
                 parent = innerClass
             }
@@ -122,7 +126,7 @@ internal class SpecialDeclarationsFactory(val context: Context) {
     }
 
     private fun createBridge(function: IrSimpleFunction,
-                             bridgeDirections: BridgeDirections) = WrappedSimpleFunctionDescriptor().let { descriptor ->
+                             bridgeDirections: BridgeDirections): IrSimpleFunction = WrappedSimpleFunctionDescriptor().let { descriptor ->
         val startOffset = function.startOffset
         val endOffset = function.endOffset
         val returnType = when (bridgeDirections.array[0]) {
@@ -257,7 +261,7 @@ internal class Context(config: KonanConfig) : KonanBackendContext(config) {
     val layoutBuilders = mutableMapOf<IrClass, ClassLayoutBuilder>()
 
     fun getLayoutBuilder(irClass: IrClass) = layoutBuilders.getOrPut(irClass) {
-        ClassLayoutBuilder(irClass, this)
+        ClassLayoutBuilder(irClass, this, isLowered = shouldLower(this, irClass))
     }
 
     lateinit var globalHierarchyAnalysisResult: GlobalHierarchyAnalysisResult
@@ -360,49 +364,6 @@ internal class Context(config: KonanConfig) : KonanBackendContext(config) {
         if (irModule == null) return
         separator("IR:")
         irModule!!.accept(DumpIrTreeVisitor(out), "")
-    }
-
-    fun printIrWithDescriptors() {
-        if (irModule == null) return
-        separator("IR:")
-        irModule!!.accept(DumpIrTreeWithDescriptorsVisitor(out), "")
-    }
-
-    fun printLocations() {
-        if (irModule == null) return
-        separator("Locations:")
-        irModule!!.acceptVoid(object: IrElementVisitorVoid {
-            override fun visitElement(element: IrElement) {
-                element.acceptChildrenVoid(this)
-            }
-
-            override fun visitFile(declaration: IrFile) {
-                val fileEntry = declaration.fileEntry
-                declaration.acceptChildren(object: IrElementVisitor<Unit, Int> {
-                    override fun visitElement(element: IrElement, data: Int) {
-                        for (i in 0..data) print("  ")
-                        println("${element.javaClass.name}: ${fileEntry.range(element)}")
-                        element.acceptChildren(this, data + 1)
-                    }
-                }, 0)
-            }
-
-            fun SourceManager.FileEntry.range(element:IrElement):String {
-                try {
-                    /* wasn't use multi line string to prevent appearing odd line
-                     * breaks in the dump. */
-                    return "${this.name}: ${this.line(element.startOffset)}" +
-                          ":${this.column(element.startOffset)} - " +
-                          "${this.line(element.endOffset)}" +
-                          ":${this.column(element.endOffset)}"
-
-                } catch (e:Exception) {
-                    return "${this.name}: ERROR(${e.javaClass.name}): ${e.message}"
-                }
-            }
-            fun SourceManager.FileEntry.line(offset:Int) = this.getLineNumber(offset)
-            fun SourceManager.FileEntry.column(offset:Int) = this.getColumnNumber(offset)
-        })
     }
 
     fun verifyBitCode() {

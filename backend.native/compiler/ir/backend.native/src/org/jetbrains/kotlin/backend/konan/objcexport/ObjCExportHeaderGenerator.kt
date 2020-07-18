@@ -201,7 +201,7 @@ internal class ObjCExportTranslatorImpl(
 
         return translateClassOrInterfaceName(descriptor).also {
             val objcName = forwardDeclarationObjcClassName(objcGenerics, descriptor, namer)
-            generator?.referenceClass(objcName, descriptor)
+            generator?.referenceClass(objcName)
         }
     }
 
@@ -211,7 +211,7 @@ internal class ObjCExportTranslatorImpl(
         generator?.requireClassOrInterface(descriptor)
 
         return translateClassOrInterfaceName(descriptor).also {
-            generator?.referenceProtocol(it.objCName, descriptor)
+            generator?.referenceProtocol(it.objCName)
         }
     }
 
@@ -365,7 +365,7 @@ internal class ObjCExportTranslatorImpl(
 
                     descriptor.enumEntries.forEach {
                         val entryName = namer.getEnumEntrySelector(it)
-                        +ObjCProperty(entryName, null, type, listOf("class", "readonly"),
+                        +ObjCProperty(entryName, it, type, listOf("class", "readonly"),
                                 declarationAttributes = listOf(swiftNameAttribute(entryName)))
                     }
                 }
@@ -640,7 +640,9 @@ internal class ObjCExportTranslatorImpl(
             attributes.addIfNotNull(mapper.getDeprecation(method)?.toDeprecationAttribute())
         }
 
-        return ObjCMethod(method, isInstanceMethod, returnType, selectorParts, parameters, attributes)
+        val comment = buildComment(method, baseMethodBridge)
+
+        return ObjCMethod(method, isInstanceMethod, returnType, selectorParts, parameters, attributes, comment)
     }
 
     private fun splitSelector(selector: String): List<String> {
@@ -651,16 +653,73 @@ internal class ObjCExportTranslatorImpl(
         }
     }
 
-    private fun exportThrown(method: FunctionDescriptor) {
-        if (!method.kind.isReal) return
-        val throwsAnnotation = method.annotations.findAnnotation(KonanFqNames.throws) ?: return
+    private fun buildComment(method: FunctionDescriptor, bridge: MethodBridge): ObjCComment? {
+        if (method.isSuspend || bridge.returnsError) {
+            val effectiveThrows = getEffectiveThrows(method).toSet()
+            return when {
+                effectiveThrows.contains(throwableClassId) -> {
+                    ObjCComment("@note This method converts all Kotlin exceptions to errors.")
+                }
 
-        val arguments = (throwsAnnotation.allValueArguments.values.single() as ArrayValue).value
-        for (argument in arguments) {
-            val classDescriptor = TypeUtils.getClassDescriptor((argument as KClassValue).getArgumentType(method.module)) ?: continue
-            generator?.requireClassOrInterface(classDescriptor)
+                effectiveThrows.isNotEmpty() -> {
+                    ObjCComment(
+                            buildString {
+                                append("@note This method converts instances of ")
+                                effectiveThrows.joinTo(this) { it.relativeClassName.asString() }
+                                append(" to errors.")
+                            },
+                            "Other uncaught Kotlin exceptions are fatal."
+                    )
+                }
+
+                else -> {
+                    // Shouldn't happen though.
+                    ObjCComment("@warning All uncaught Kotlin exceptions are fatal.")
+                }
+            }
         }
+
+        return null
     }
+
+    private val throwableClassId = ClassId.topLevel(KotlinBuiltIns.FQ_NAMES.throwable)
+
+    private fun getEffectiveThrows(method: FunctionDescriptor): Sequence<ClassId> {
+        method.overriddenDescriptors.firstOrNull()?.let { return getEffectiveThrows(it) }
+        return getDefinedThrows(method).orEmpty()
+    }
+
+    private fun exportThrown(method: FunctionDescriptor) {
+        getDefinedThrows(method)
+                ?.mapNotNull { method.module.findClassAcrossModuleDependencies(it) }
+                ?.forEach { generator?.requireClassOrInterface(it) }
+    }
+
+    private fun getDefinedThrows(method: FunctionDescriptor): Sequence<ClassId>? {
+        if (!method.kind.isReal) return null
+
+        val throwsAnnotation = method.annotations.findAnnotation(KonanFqNames.throws)
+
+        if (throwsAnnotation != null) {
+            val argumentsArrayValue = throwsAnnotation.firstArgument() as? ArrayValue
+            return argumentsArrayValue?.value?.asSequence().orEmpty()
+                    .filterIsInstance<KClassValue>()
+                    .mapNotNull {
+                        when (val value = it.value) {
+                            is KClassValue.Value.NormalClass -> value.classId
+                            is KClassValue.Value.LocalClass -> null
+                        }
+                    }
+        }
+
+        if (method.isSuspend && method.overriddenDescriptors.isEmpty()) {
+            return implicitSuspendThrows
+        }
+
+        return null
+    }
+
+    private val implicitSuspendThrows = sequenceOf(ClassId.topLevel(KonanFqNames.cancellationException))
 
     private fun mapReturnType(returnBridge: MethodBridge.ReturnValue, method: FunctionDescriptor, objCExportScope: ObjCExportScope): ObjCType = when (returnBridge) {
         MethodBridge.ReturnValue.Suspend,
@@ -949,6 +1008,12 @@ abstract class ObjCExportHeaderGenerator internal constructor(
         add("#pragma clang diagnostic push")
         listOf(
                 "-Wunknown-warning-option",
+
+                // Protocols don't have generics, classes do. So generated header may contain
+                // overriding property with "incompatible" type, e.g. `Generic<T>`-typed property
+                // overriding `Generic<id>`. Suppress these warnings:
+                "-Wincompatible-property-type",
+
                 "-Wnullability"
         ).forEach {
             add("#pragma clang diagnostic ignored \"$it\"")
@@ -1072,11 +1137,11 @@ abstract class ObjCExportHeaderGenerator internal constructor(
         }
     }
 
-    internal fun referenceClass(objCName: String, descriptor: ClassDescriptor? = null) {
+    internal fun referenceClass(objCName: String) {
         classForwardDeclarations += objCName
     }
 
-    internal fun referenceProtocol(objCName: String, descriptor: ClassDescriptor? = null) {
+    internal fun referenceProtocol(objCName: String) {
         protocolForwardDeclarations += objCName
     }
 }

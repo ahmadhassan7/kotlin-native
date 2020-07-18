@@ -1,8 +1,9 @@
 package org.jetbrains.kotlin.backend.konan
 
 import org.jetbrains.kotlin.backend.common.*
-import org.jetbrains.kotlin.backend.common.extensions.IrPluginContext
+import org.jetbrains.kotlin.backend.common.extensions.IrPluginContextImpl
 import org.jetbrains.kotlin.backend.common.extensions.IrGenerationExtension
+import org.jetbrains.kotlin.backend.common.overrides.FakeOverrideChecker
 import org.jetbrains.kotlin.backend.common.phaser.*
 import org.jetbrains.kotlin.backend.common.serialization.mangle.ManglerChecker
 import org.jetbrains.kotlin.backend.common.serialization.mangle.descriptor.Ir2DescriptorManglerAdapter
@@ -10,7 +11,6 @@ import org.jetbrains.kotlin.backend.common.serialization.metadata.KlibMetadataMo
 import org.jetbrains.kotlin.backend.konan.descriptors.isForwardDeclarationModule
 import org.jetbrains.kotlin.backend.konan.descriptors.isFromInteropLibrary
 import org.jetbrains.kotlin.backend.konan.descriptors.konanLibrary
-import org.jetbrains.kotlin.backend.konan.ir.interop.IrProviderForInteropStubs
 import org.jetbrains.kotlin.backend.konan.ir.KonanSymbols
 import org.jetbrains.kotlin.backend.konan.ir.interop.IrProviderForCEnumAndCStructStubs
 import org.jetbrains.kotlin.backend.konan.llvm.*
@@ -20,16 +20,16 @@ import org.jetbrains.kotlin.backend.konan.serialization.*
 import org.jetbrains.kotlin.cli.common.messages.AnalyzerWithCompilerReport
 import org.jetbrains.kotlin.config.CommonConfigurationKeys
 import org.jetbrains.kotlin.config.languageVersionSettings
-import org.jetbrains.kotlin.descriptors.*
-import org.jetbrains.kotlin.descriptors.konan.isKonanStdlib
+import org.jetbrains.kotlin.descriptors.DeclarationDescriptor
+import org.jetbrains.kotlin.descriptors.ModuleDescriptor
+import org.jetbrains.kotlin.descriptors.konan.DeserializedKlibModuleOrigin
+import org.jetbrains.kotlin.descriptors.konan.KlibModuleOrigin
+import org.jetbrains.kotlin.descriptors.konan.isNativeStdlib
+import org.jetbrains.kotlin.ir.declarations.IrDeclaration
 import org.jetbrains.kotlin.ir.declarations.IrFile
 import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
 import org.jetbrains.kotlin.ir.symbols.IrSymbol
-import org.jetbrains.kotlin.ir.util.DeclarationStubGenerator
-import org.jetbrains.kotlin.ir.util.SymbolTable
-import org.jetbrains.kotlin.ir.util.addChild
-import org.jetbrains.kotlin.ir.util.addFile
-import org.jetbrains.kotlin.ir.util.file
+import org.jetbrains.kotlin.ir.util.*
 import org.jetbrains.kotlin.ir.visitors.acceptVoid
 import org.jetbrains.kotlin.konan.target.CompilerOutputKind
 import org.jetbrains.kotlin.psi2ir.Psi2IrConfiguration
@@ -140,28 +140,15 @@ internal val buildCExportsPhase = konanUnitPhase(
 internal val psiToIrPhase = konanUnitPhase(
         op = {
             // Translate AST to high level IR.
-            val mppKlibs = config.configuration.get(CommonConfigurationKeys.KLIB_MPP)?:false
+            val expectActualLinker = config.configuration.get(CommonConfigurationKeys.EXPECT_ACTUAL_LINKER)?:false
 
             val symbolTable = symbolTable!!
 
             val translator = Psi2IrTranslator(config.configuration.languageVersionSettings,
                     Psi2IrConfiguration(false), KonanIdSignaturer(KonanManglerDesc))
-            val generatorContext = translator.createGeneratorContext(moduleDescriptor, bindingContext, symbolTable)
+            val generatorContext = translator.createGeneratorContext(moduleDescriptor, bindingContext, symbolTable = symbolTable)
 
-            translator.addPostprocessingStep { module ->
-                val extensions = IrGenerationExtension.getInstances(config.project)
-                val pluginContext = IrPluginContext(
-                    generatorContext.moduleDescriptor,
-                    generatorContext.bindingContext,
-                    generatorContext.languageVersionSettings,
-                    generatorContext.symbolTable,
-                    generatorContext.typeTranslator,
-                    generatorContext.irBuiltIns
-                )
-                extensions.forEach { extension ->
-                    extension.generate(module, pluginContext)
-                }
-            }
+            val pluginExtensions = IrGenerationExtension.getInstances(config.project)
 
             val forwardDeclarationsModuleDescriptor = moduleDescriptor.allDependencyModules.firstOrNull { it.isForwardDeclarationModule }
 
@@ -171,14 +158,48 @@ internal val psiToIrPhase = konanUnitPhase(
             // Note: using [llvmModuleSpecification] since this phase produces IR for generating single LLVM module.
 
             val exportedDependencies = (getExportedDependencies() + modulesWithoutDCE).distinct()
-            val deserializer = KonanIrLinker(
+            val functionIrClassFactory = BuiltInFictitiousFunctionIrClassFactory(
+                    symbolTable, generatorContext.irBuiltIns, reflectionTypes)
+            generatorContext.irBuiltIns.functionFactory = functionIrClassFactory
+            val stubGenerator = DeclarationStubGenerator(
+                    moduleDescriptor, symbolTable,
+                    config.configuration.languageVersionSettings
+            )
+            val symbols = KonanSymbols(this, generatorContext.irBuiltIns, symbolTable, symbolTable.lazyWrapper, functionIrClassFactory)
+
+            val irProviderForCEnumsAndCStructs =
+                    IrProviderForCEnumAndCStructStubs(generatorContext, interopBuiltIns, symbols)
+
+            val deserializeFakeOverrides = config.configuration.getBoolean(CommonConfigurationKeys.DESERIALIZE_FAKE_OVERRIDES)
+
+            val linker =
+                KonanIrLinker(
                     moduleDescriptor,
+                    functionIrClassFactory,
                     this as LoggingContext,
                     generatorContext.irBuiltIns,
                     symbolTable,
                     forwardDeclarationsModuleDescriptor,
-                    exportedDependencies
+                    stubGenerator,
+                    irProviderForCEnumsAndCStructs,
+                    exportedDependencies,
+                    deserializeFakeOverrides
             )
+
+            translator.addPostprocessingStep { module ->
+                val pluginContext = IrPluginContextImpl(
+                        generatorContext.moduleDescriptor,
+                        generatorContext.bindingContext,
+                        generatorContext.languageVersionSettings,
+                        generatorContext.symbolTable,
+                        generatorContext.typeTranslator,
+                        generatorContext.irBuiltIns,
+                        linker = linker
+                )
+                pluginExtensions.forEach { extension ->
+                    extension.generate(module, pluginContext)
+                }
+            }
 
             var dependenciesCount = 0
             while (true) {
@@ -193,39 +214,23 @@ internal val psiToIrPhase = konanUnitPhase(
                     }.reversed()
                 }
 
-                for (dependency in sortDependencies(dependencies)) {
-                    deserializer.deserializeIrModuleHeader(dependency)
+                for (dependency in sortDependencies(dependencies).filter { it != moduleDescriptor }) {
+                    val kotlinLibrary = dependency.getCapability(KlibModuleOrigin.CAPABILITY)?.let {
+                        (it as? DeserializedKlibModuleOrigin)?.library
+                    }
+                    linker.deserializeIrModuleHeader(dependency, kotlinLibrary)
                 }
                 if (dependencies.size == dependenciesCount) break
                 dependenciesCount = dependencies.size
             }
 
-            deserializer.initializeExpectActualLinker()
-
-            val functionIrClassFactory = BuiltInFictitiousFunctionIrClassFactory(
-                    symbolTable, generatorContext.irBuiltIns, reflectionTypes)
-            val symbols = KonanSymbols(this, symbolTable, symbolTable.lazyWrapper, functionIrClassFactory)
-            val stubGenerator = DeclarationStubGenerator(
-                    moduleDescriptor, symbolTable,
-                    config.configuration.languageVersionSettings
-            )
-            val irProviderForCEnumsAndCStructs = IrProviderForCEnumAndCStructStubs(generatorContext, interopBuiltIns, symbols)
             // We need to run `buildAllEnumsAndStructsFrom` before `generateModuleFragment` because it adds references to symbolTable
             // that should be bound.
             modulesWithoutDCE
                     .filter(ModuleDescriptor::isFromInteropLibrary)
-                    .forEach(irProviderForCEnumsAndCStructs::buildAllEnumsAndStructsFrom)
-            val irProviderForInteropStubs = IrProviderForInteropStubs(
-                    stubGenerator,
-                    irProviderForCEnumsAndCStructs::canHandleSymbol
-            )
-            val irProviders = listOf(
-                    irProviderForCEnumsAndCStructs,
-                    irProviderForInteropStubs,
-                    functionIrClassFactory,
-                    deserializer,
-                    stubGenerator
-            )
+                    .forEach(irProviderForCEnumsAndCStructs::referenceAllEnumsAndStructsFrom)
+
+            val irProviders = listOf(linker)
             stubGenerator.setIrProviders(irProviders)
 
             expectDescriptorToSymbol = mutableMapOf<DeclarationDescriptor, IrSymbol>()
@@ -233,43 +238,55 @@ internal val psiToIrPhase = konanUnitPhase(
                 generatorContext,
                 environment.getSourceFiles(),
                 irProviders,
+                pluginExtensions,
                 // TODO: This is a hack to allow platform libs to build in reasonable time.
                 // referenceExpectsForUsedActuals() appears to be quadratic in time because of
                 // how ExpectedActualResolver is implemented.
                 // Need to fix ExpectActualResolver to either cache expects or somehow reduce the member scope searches.
-                if (mppKlibs) expectDescriptorToSymbol else null
+                if (expectActualLinker) expectDescriptorToSymbol else null
             )
 
-            deserializer.finalizeExpectActualLinker()
+            linker.postProcess()
 
             if (this.stdlibModule in modulesWithoutDCE) {
                 functionIrClassFactory.buildAllClasses()
             }
-            modulesWithoutDCE
-                    .filter(ModuleDescriptor::isFromInteropLibrary)
-                    .forEach(irProviderForCEnumsAndCStructs::buildAllEnumsAndStructsFrom)
+
+            // Enable lazy IR genration for newly-created symbols inside BE
+            stubGenerator.unboundSymbolGeneration = true
+
+            symbolTable.noUnboundLeft("Unbound symbols left after linker")
 
             module.acceptVoid(ManglerChecker(KonanManglerIr, Ir2DescriptorManglerAdapter(KonanManglerDesc)))
+            if (!config.configuration.getBoolean(KonanConfigKeys.DISABLE_FAKE_OVERRIDE_VALIDATOR)) {
+                val fakeOverrideChecker = FakeOverrideChecker(KonanManglerIr, KonanManglerDesc)
+                linker.modules.values.forEach { fakeOverrideChecker.check(it) }
+            }
 
             irModule = module
-            irModules = deserializer.modules.filterValues { llvmModuleSpecification.containsModule(it) }
+
+            // Note: coupled with [shouldLower] below.
+            irModules = linker.modules.filterValues { llvmModuleSpecification.containsModule(it) }
+
             ir.symbols = symbols
 
             functionIrClassFactory.module =
-                    (listOf(irModule!!) + deserializer.modules.values)
-                            .single { it.descriptor.isKonanStdlib() }
-
-            irProviderForCEnumsAndCStructs.module = module
+                    (listOf(irModule!!) + linker.modules.values)
+                            .single { it.descriptor.isNativeStdlib() }
         },
         name = "Psi2Ir",
         description = "Psi to IR conversion",
         prerequisite = setOf(createSymbolTablePhase)
 )
 
+// Coupled with [psiToIrPhase] logic above.
+internal fun shouldLower(context: Context, declaration: IrDeclaration): Boolean {
+    return context.llvmModuleSpecification.containsDeclaration(declaration)
+}
+
 internal val destroySymbolTablePhase = konanUnitPhase(
         op = {
             this.symbolTable = null // TODO: invalidate symbolTable itself.
-            ir.symbols.functionIrClassFactory.symbolTable = null
         },
         name = "DestroySymbolTable",
         description = "Destroy SymbolTable",
@@ -289,18 +306,18 @@ internal val copyDefaultValuesToActualPhase = konanUnitPhase(
 
 internal val serializerPhase = konanUnitPhase(
         op = {
-            val mppKlibs = config.configuration.get(CommonConfigurationKeys.KLIB_MPP)?:false
+            val expectActualLinker = config.configuration.get(CommonConfigurationKeys.EXPECT_ACTUAL_LINKER)?:false
 
             serializedIr = irModule?.let { ir ->
                 KonanIrModuleSerializer(
-                    this, ir.irBuiltins, expectDescriptorToSymbol, skipExpects = !mppKlibs
+                    this, ir.irBuiltins, expectDescriptorToSymbol, skipExpects = !expectActualLinker
                 ).serializedIrModule(ir)
             }
 
             val serializer = KlibMetadataMonolithicSerializer(
                 this.config.configuration.languageVersionSettings,
                 config.configuration.get(CommonConfigurationKeys.METADATA_VERSION)!!,
-                !mppKlibs)
+                !expectActualLinker)
             serializedMetadata = serializer.serializeModule(moduleDescriptor)
         },
         name = "Serializer",
@@ -319,50 +336,56 @@ internal val linkerPhase = konanUnitPhase(
         description = "Linker"
 )
 
-internal val allLoweringsPhase = namedIrModulePhase(
+internal val allLoweringsPhase = NamedCompilerPhase(
         name = "IrLowering",
         description = "IR Lowering",
+        // TODO: The lowerings before inlinePhase should be aligned with [NativeInlineFunctionResolver.kt]
         lower = removeExpectDeclarationsPhase then
                 stripTypeAliasDeclarationsPhase then
                 lowerBeforeInlinePhase then
                 arrayConstructorPhase then
+                lateinitPhase then
+                sharedVariablesPhase then
+                extractLocalClassesFromInlineBodies then
                 inlinePhase then
                 provisionalFunctionExpressionPhase then
                 lowerAfterInlinePhase then
                 performByIrFile(
                         name = "IrLowerByFile",
                         description = "IR Lowering by file",
-                        lower = lateinitPhase then
-                                forLoopsPhase then
-                                stringConcatenationPhase then
-                                enumConstructorsPhase then
-                                initializersPhase then
-                                sharedVariablesPhase then
-                                localFunctionsPhase then
-                                tailrecPhase then
-                                defaultParameterExtentPhase then
-                                innerClassPhase then
-                                dataClassesPhase then
-                                singleAbstractMethodPhase then
-                                builtinOperatorPhase then
-                                finallyBlocksPhase then
-                                testProcessorPhase then
-                                enumClassPhase then
-                                delegationPhase then
-                                callableReferencePhase then
-                                interopPhase then
-                                varargPhase then
-                                compileTimeEvaluatePhase then
-                                coroutinesPhase then
-                                typeOperatorPhase then
-                                bridgesPhase then
-                                autoboxPhase then
-                                returnsInsertionPhase
+                        lower = listOf(
+                            forLoopsPhase,
+                            stringConcatenationPhase,
+                            enumConstructorsPhase,
+                            initializersPhase,
+                            localFunctionsPhase,
+                            tailrecPhase,
+                            defaultParameterExtentPhase,
+                            innerClassPhase,
+                            dataClassesPhase,
+                            singleAbstractMethodPhase,
+                            ifNullExpressionsFusionPhase,
+                            builtinOperatorPhase,
+                            finallyBlocksPhase,
+                            testProcessorPhase,
+                            enumClassPhase,
+                            delegationPhase,
+                            callableReferencePhase,
+                            interopPhase,
+                            varargPhase,
+                            compileTimeEvaluatePhase,
+                            kotlinNothingValueExceptionPhase,
+                            coroutinesPhase,
+                            typeOperatorPhase,
+                            bridgesPhase,
+                            autoboxPhase,
+                            returnsInsertionPhase,
+                        )
                 ),
         actions = setOf(defaultDumper, ::moduleValidationCallback)
 )
 
-internal val dependenciesLowerPhase = SameTypeNamedPhaseWrapper(
+internal val dependenciesLowerPhase = NamedCompilerPhase(
         name = "LowerLibIR",
         description = "Lower library's IR",
         prerequisite = emptySet(),
@@ -393,41 +416,38 @@ internal val dependenciesLowerPhase = SameTypeNamedPhaseWrapper(
                                     ?: return@forEach
                             input.files += libModule.files
                         }
+
                 input.files += files
 
                 return input
             }
         })
 
-internal val entryPointPhase = SameTypeNamedPhaseWrapper(
+internal val entryPointPhase = makeCustomPhase<Context, IrModuleFragment>(
         name = "addEntryPoint",
         description = "Add entry point for program",
         prerequisite = emptySet(),
-        lower = object : CompilerPhase<Context, IrModuleFragment, IrModuleFragment> {
-            override fun invoke(phaseConfig: PhaseConfig, phaserState: PhaserState<IrModuleFragment>,
-                                context: Context, input: IrModuleFragment): IrModuleFragment {
-                assert(context.config.produce == CompilerOutputKind.PROGRAM)
+        op = { context, _ ->
+            assert(context.config.produce == CompilerOutputKind.PROGRAM)
 
-                val originalFile = context.ir.symbols.entryPoint!!.owner.file
-                val originalModule = originalFile.packageFragmentDescriptor.containingDeclaration
-                val file = if (context.llvmModuleSpecification.containsModule(originalModule)) {
-                    originalFile
-                } else {
-                    // `main` function is compiled to other LLVM module.
-                    // For example, test running support uses `main` defined in stdlib.
-                    context.irModule!!.addFile(originalFile.fileEntry, originalFile.fqName)
-                }
-
-                require(context.llvmModuleSpecification.containsModule(
-                        file.packageFragmentDescriptor.containingDeclaration))
-
-                file.addChild(makeEntryPoint(context))
-                return input
+            val originalFile = context.ir.symbols.entryPoint!!.owner.file
+            val originalModule = originalFile.packageFragmentDescriptor.containingDeclaration
+            val file = if (context.llvmModuleSpecification.containsModule(originalModule)) {
+                originalFile
+            } else {
+                // `main` function is compiled to other LLVM module.
+                // For example, test running support uses `main` defined in stdlib.
+                context.irModule!!.addFile(originalFile.fileEntry, originalFile.fqName)
             }
+
+            require(context.llvmModuleSpecification.containsModule(
+                    file.packageFragmentDescriptor.containingDeclaration))
+
+            file.addChild(makeEntryPoint(context))
         }
 )
 
-internal val bitcodePhase = namedIrModulePhase(
+internal val bitcodePhase = NamedCompilerPhase(
         name = "Bitcode",
         description = "LLVM Bitcode generation",
         lower = contextLLVMSetupPhase then

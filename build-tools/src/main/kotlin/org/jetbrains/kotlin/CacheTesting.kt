@@ -25,7 +25,7 @@ fun configureCacheTesting(project: Project): CacheTesting? {
     val target = project.testTarget
 
     val cacheDir = project.file("${project.buildDir}/cache")
-    val cacheFile = "$cacheDir/${cacheKind.prefix(target)}stdlib-cache${cacheKind.suffix(target)}"
+    val cacheFile = "$cacheDir/stdlib-cache"
     val dist = project.kotlinNativeDist
     val stdlib = "$dist/klib/common/stdlib"
     val compilerArgs = listOf("-Xcached-library=$stdlib,$cacheFile")
@@ -39,7 +39,6 @@ fun configureCacheTesting(project: Project): CacheTesting? {
             val tasks = listOf(
                     "${target}CrossDist",
                     "${target}CrossDistRuntime",
-                    "commonDistRuntime",
                     "distCompiler"
             ).map { task -> project.rootProject.tasks.getByName(task) }
 

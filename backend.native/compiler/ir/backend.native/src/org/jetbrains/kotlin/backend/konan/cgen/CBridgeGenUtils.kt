@@ -9,7 +9,10 @@ import org.jetbrains.kotlin.descriptors.Modality
 import org.jetbrains.kotlin.descriptors.Visibilities
 import org.jetbrains.kotlin.ir.IrStatement
 import org.jetbrains.kotlin.ir.builders.*
-import org.jetbrains.kotlin.ir.declarations.*
+import org.jetbrains.kotlin.ir.declarations.IrDeclarationOrigin
+import org.jetbrains.kotlin.ir.declarations.IrFunction
+import org.jetbrains.kotlin.ir.declarations.IrValueParameter
+import org.jetbrains.kotlin.ir.declarations.IrVariable
 import org.jetbrains.kotlin.ir.declarations.impl.IrFunctionImpl
 import org.jetbrains.kotlin.ir.declarations.impl.IrValueParameterImpl
 import org.jetbrains.kotlin.ir.descriptors.WrappedSimpleFunctionDescriptor
@@ -20,8 +23,10 @@ import org.jetbrains.kotlin.ir.expressions.impl.IrTryImpl
 import org.jetbrains.kotlin.ir.symbols.impl.IrSimpleFunctionSymbolImpl
 import org.jetbrains.kotlin.ir.symbols.impl.IrValueParameterSymbolImpl
 import org.jetbrains.kotlin.ir.types.IrType
-import org.jetbrains.kotlin.ir.types.impl.IrUninitializedType
-import org.jetbrains.kotlin.ir.util.*
+import org.jetbrains.kotlin.ir.types.impl.*
+import org.jetbrains.kotlin.ir.util.constructors
+import org.jetbrains.kotlin.ir.util.irBuilder
+import org.jetbrains.kotlin.ir.util.irCatch
 import org.jetbrains.kotlin.name.Name
 
 internal class CFunctionBuilder {
@@ -101,9 +106,9 @@ private fun createKotlinBridge(
         cBridgeName: String,
         stubs: KotlinStubs,
         isExternal: Boolean
-): IrFunctionImpl {
+): IrFunction {
     val bridgeDescriptor = WrappedSimpleFunctionDescriptor()
-    val bridge = IrFunctionImpl(
+    @Suppress("DEPRECATION") val bridge = IrFunctionImpl(
             startOffset,
             endOffset,
             IrDeclarationOrigin.DEFINED,
@@ -186,7 +191,7 @@ internal class KotlinCallBuilder(private val irBuilder: IrBuilderWithScope, priv
 
     fun build(
             function: IrFunction,
-            transformCall: (IrMemberAccessExpression) -> IrExpression = { it }
+            transformCall: (IrMemberAccessExpression<*>) -> IrExpression = { it }
     ): IrExpression {
         val arguments = this.arguments.toMutableList()
 

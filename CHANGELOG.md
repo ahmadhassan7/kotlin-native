@@ -1,3 +1,19 @@
+# v1.4.0-M3 (Jun 2020)
+  * Tune GC to improve execution time performance ([`KT-19076`](https://youtrack.jetbrains.com/issue/KT-19076)).
+  * Handle variadic block types in ObjC interop ([`KT-36766`](https://youtrack.jetbrains.com/issue/KT-36766))
+
+# v1.3.72 (April 2020)
+  * Fix ios_x64 platform libs cache for iOS 11 and 12 (GH-4071)
+
+# v1.3.71 (March 2020)
+  * Fix `lazy {}` memory leak regression ([`KT-37232`](https://youtrack.jetbrains.com/issue/KT-37232), GH-3944)
+  * Fix using cached Kotlin subclasses of Objective-C classes (GH-3986)
+  
+# v1.4.0-M1 (Mar 2020) milestone
+  * Experimental mimalloc allocator support (-Xallocator=mimalloc) to improve execution time performance.
+  * Improved support for -Xobjc-generics and enabled by default (GH-3778).
+  * Reworked exception handling in ObjC/Swift interop.
+
 # v1.3.70 (Dec 2019)
   * Support compiler caches for debug mode (GH-3650)
   * Support running Kotlin/Native compiler from Gradle daemon (GH-3442)

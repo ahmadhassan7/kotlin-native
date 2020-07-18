@@ -21,6 +21,8 @@ See [calculator sample](https://github.com/JetBrains/kotlin-native/tree/master/s
 
 The table below shows how Kotlin concepts are mapped to Swift/Objective-C and vice versa.
 
+"->" and "<-" indicate that mapping only goes one way.
+
 | Kotlin | Swift | Objective-C | Notes |
 | ------ | ----- |------------ | ----- |
 | `class` | `class` | `@interface` | [note](#name-translation) |
@@ -28,7 +30,8 @@ The table below shows how Kotlin concepts are mapped to Swift/Objective-C and vi
 | `constructor`/`create` | Initializer | Initializer | [note](#initializers) |
 | Property | Property | Property | [note](#top-level-functions-and-properties) [note](#setters)|
 | Method | Method | Method | [note](#top-level-functions-and-properties) [note](#method-names-translation) |
-| `@Throws` | `throws` | `error:(NSError**)error` | [note](#errors-and-exceptions) |
+| `suspend` -> | `completionHandler:` | | [note](#errors-and-exceptions) |
+| `@Throws fun` | `throws` | `error:(NSError**)error` | [note](#errors-and-exceptions) |
 | Extension | Extension | Category member | [note](#category-members) |
 | `companion` member <- | Class method or property | Class method or property |  |
 | `null` | `nil` | `nil` | |
@@ -44,7 +47,6 @@ The table below shows how Kotlin concepts are mapped to Swift/Objective-C and vi
 | `Map` | `Dictionary` | `NSDictionary` | |
 | `MutableMap` | `NSMutableDictionary` | `NSMutableDictionary` | [note](#collections) |
 | Function type | Function type | Block pointer type | [note](#function-types) |
-| Suspend functions| Unsupported| Unsupported| [note](#unsupported) |
 | Inline classes | Unsupported| Unsupported| [note](#unsupported) |
 
 
@@ -131,14 +133,19 @@ Swift has only checked errors. So if Swift or Objective-C code calls a Kotlin me
 which throws an exception to be handled, then the Kotlin method should be marked
 with a `@Throws` annotation specifying a list of "expected" exception classes.
 
-When compiling to Objective-C/Swift framework, functions having or inheriting
+When compiling to Objective-C/Swift framework, non-`suspend` functions having or inheriting
 `@Throws` annotation are represented as `NSError*`-producing methods in Objective-C
-and as `throws` methods in Swift.
+and as `throws` methods in Swift. Representations for `suspend` functions always have
+`NSError*`/`Error` parameter in completion handler.
 
 When Kotlin function called from Swift/Objective-C code throws an exception
 which is an instance of one of the `@Throws`-specified classes or their subclasses,
 it is propagated as `NSError`. Other Kotlin exceptions reaching Swift/Objective-C
 are considered unhandled and cause program termination.
+
+`suspend` functions without `@Throws` propagate only
+`CancellationException` as `NSError`. Non-`suspend` functions without `@Throws`
+don't propagate Kotlin exceptions at all.
 
 Note that the opposite reversed translation is not implemented yet:
 Swift/Objective-C error-throwing methods aren't imported to Kotlin as
@@ -401,7 +408,6 @@ See [INTEROP.md](INTEROP.md) for an example case where the library uses some pla
 
 Some features of Kotlin programming language are not yet mapped into respective features of Objective-C or Swift.
 Currently, following features are not properly exposed in generated framework headers:
-   * suspend functions
    * inline classes (arguments are mapped as either underlying primitive type or `id`)
    * custom classes implementing standard Kotlin collection interfaces (`List`, `Map`, `Set`) and other special classes
    * Kotlin subclasses of Objective-C classes

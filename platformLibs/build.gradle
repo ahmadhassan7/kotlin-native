@@ -42,8 +42,7 @@ private ArrayList<DefFile> targetDefFiles(KonanTarget  target) {
             .findAll { it.name.endsWith(".def") }
             // The libz.a/libz.so and zlib.h are missing in MIPS sysroots.
             // Just workaround it until we have sysroots corrected.
-            .findAll { ! ((target instanceof KonanTarget.LINUX_MIPS32 ||
-                           target instanceof KonanTarget.LINUX_MIPSEL32) && it.name == 'zlib.def') }
+            .findAll { ! ((target in targetsWithoutZlib) && it.name == 'zlib.def') }
             .collect { DefFileKt.DefFile(it, target) }
 }
 
@@ -86,7 +85,7 @@ project.rootProject.ext.platformManager.enabled.each { target ->
                         "${fileNamePrefix}${it}".toString()
                     }
                 }
-                extraOpts '-Xpurge-user-libs'
+                extraOpts '-Xpurge-user-libs', "-Xshort-module-name", df.name
                 compilerOpts "-fmodules-cache-path=${project.buildDir}/clangModulesCache"
             }
         }

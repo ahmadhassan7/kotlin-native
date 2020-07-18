@@ -23,8 +23,10 @@ import org.jetbrains.kotlin.PlatformInfo
 import org.jetbrains.kotlin.KotlinBuildPusher
 import org.jetbrains.kotlin.CollisionDetector
 import org.jetbrains.kotlin.CollisionTransformer
+import org.jetbrains.kotlin.CompilationDatabaseKt
 import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
 import org.apache.tools.ant.filters.ReplaceTokens
+import org.jetbrains.kotlin.UtilsKt
 
 buildscript {
     apply from: "gradle/kotlinGradlePlugin.gradle"
@@ -33,6 +35,7 @@ buildscript {
         maven { url kotlinCompilerRepo }
         maven { url "https://kotlin.bintray.com/kotlinx" }
         maven { url "https://cache-redirector.jetbrains.com/maven-central" }
+        maven { url "https://dl.bintray.com/kotlin/kotlin-dev" }
         jcenter()
     }
 
@@ -74,6 +77,14 @@ ext {
     ]
     cacheableTargetNames = cacheableTargets.collect { it.visibleName }
 
+    // Some targets miss zlib in their sysroots.
+    // We skip these targets when generate a corresponding platform library.
+    // See also: the :distDef task, targetDefFiles in the :platformLibs project.
+    targetsWithoutZlib = [
+            KonanTarget.LINUX_MIPS32.INSTANCE,
+            KonanTarget.LINUX_MIPSEL32.INSTANCE
+    ]
+
     kotlinCompilerModule="org.jetbrains.kotlin:kotlin-compiler:${kotlinVersion}"
     kotlinStdLibModule="org.jetbrains.kotlin:kotlin-stdlib:${kotlinVersion}"
     kotlinCommonStdlibModule="org.jetbrains.kotlin:kotlin-stdlib-common:${kotlinStdlibVersion}:sources"
@@ -81,7 +92,6 @@ ext {
     kotlinTestAnnotationsCommonModule="org.jetbrains.kotlin:kotlin-test-annotations-common:${kotlinStdlibVersion}:sources"
     kotlinReflectModule="org.jetbrains.kotlin:kotlin-reflect:${kotlinVersion}"
     kotlinScriptRuntimeModule="org.jetbrains.kotlin:kotlin-script-runtime:${kotlinVersion}"
-    kotlinNativeUtilsModule="org.jetbrains.kotlin:kotlin-native-utils:${kotlinVersion}"
     kotlinUtilKliMetadatabModule="org.jetbrains.kotlin:kotlin-util-klib-metadata:${kotlinVersion}"
 
     konanVersionFull = CompilerVersionGeneratedKt.getCurrentCompilerVersion()
@@ -94,6 +104,7 @@ allprojects {
             maven {
                 url 'https://cache-redirector.jetbrains.com/jcenter'
             }
+            maven { url "https://dl.bintray.com/kotlin/kotlin-dev" }
         }
     }
     if (path != ":dependencies") {
@@ -205,12 +216,11 @@ dependencies {
     distPack project(':Interop:Indexer')
     distPack project(':Interop:StubGenerator')
     distPack project(':backend.native')
-    distPack project(':utilities')
+    distPack project(':utilities:cli-runner')
+    distPack project(':utilities:basic-utils')
     distPack project(':klib')
     distPack project(path: ':endorsedLibraries:kotlinx.cli', configuration: "jvmRuntimeElements")
     distPack "org.jetbrains.kotlin:kotlin-native-shared:$konanVersion"
-    distPack "org.jetbrains.kotlin:konan.metadata:$konanVersion"
-    distPack  "org.jetbrains.kotlin:konan.serializer:$konanVersion"
 }
 
 task sharedJar {
@@ -276,6 +286,7 @@ task detectJarCollision(type: CollisionDetector) {
     resolvingRules["META-INF/metadata.kotlin_module"] = "kotlin-compiler"
     resolvingRules["META-INF/type-system.kotlin_module"] = "kotlin-compiler"
     resolvingRules["META-INF/util.runtime.kotlin_module"] = "kotlin-compiler"
+    resolvingRules["META-INF/kotlin-native-utils.kotlin_module"] = "kotlin-compiler"
 
     // These collisions are introduced by kotlinx-metadata-klib.
     resolvingRules["META-INF/serialization.kotlin_module"] = "kotlin-compiler"
@@ -293,23 +304,25 @@ task detectJarCollision(type: CollisionDetector) {
     resolvingRules["org/jetbrains/kotlin/builtins/konan/KonanBuiltIns.class"] = "kotlin-compiler"
     resolvingRules["org/jetbrains/kotlin/resolve/konan/platform/NativeInliningRule.class"] = "kotlin-compiler"
     resolvingRules["org/jetbrains/kotlin/resolve/konan/platform/NativePlatformAnalyzerServices.class"] = "kotlin-compiler"
-    librariesWithIgnoredClassCollisions.addAll(["kotlin-util-klib", "kotlin-util-io", "kotlinx-metadata-klib"])
+    librariesWithIgnoredClassCollisions.addAll(["kotlin-util-klib", "kotlin-util-io", "kotlinx-metadata-klib", "kotlin-native-utils"])
     if (project.hasProperty('kotlinProjectPath')) {
         resolvingRulesWithRegexes[new Regex("META-INF/.+\\.kotlin_module")] = "kotlin-compiler"
         resolvingRules["META-INF/extensions/compiler.xml"] = "kotlin-compiler"
         resolvingRules["META-INF/compiler.version"] = "kotlin-compiler"
         resolvingRules["kotlinManifest.properties"] = "kotlin-compiler"
         librariesWithIgnoredClassCollisions.addAll(["util", "container", "resolution", "serialization", "psi", "frontend",
+                                                    "config", "config.jvm", "js.config", "javac-wrapper",
                                                     "frontend.common", "frontend.java", "cli-common", "ir.tree",
                                                     "ir.psi2ir", "ir.backend.common", "backend.jvm", "backend.js",
                                                     "backend.wasm", "ir.serialization.common", "ir.serialization.js",
-                                                    "ir.serialization.jvm", "jvm", "compiler.version",
+                                                    "ir.serialization.jvm", "ir.interpreter", "jvm", "compiler.version",
                                                     "backend-common", "backend", "plugin-api", "light-classes", "cli",
                                                     "cli-js", "incremental-compilation-impl", "js.ast", "js.serializer",
                                                     "js.parser", "js.frontend", "js.translator", "js.dce", "metadata",
                                                     "metadata.jvm", "descriptors", "descriptors.jvm", "descriptors.runtime",
                                                     "deserialization", "util.runtime", "type-system", "cones", "resolve",
-                                                    "tree", "psi2fir", "fir2ir", "java", "kotlin-build-common", "lightTree"])
+                                                    "tree", "psi2fir", "fir2ir", "java", "kotlin-build-common", "lightTree",
+                                                    "jvm", "checkers", "fir-common", "light-tree2fir", "fir-serialization"])
     }
 }
 
@@ -318,6 +331,9 @@ task shadowJar(type: ShadowJar) {
     mergeServiceFiles()
     destinationDirectory.set(file("$distDir/konan/lib"))
     archiveBaseName.set("kotlin-native")
+    // Exclude trove4j because of license agreement.
+    exclude "*trove4j*"
+    exclude("META-INF/versions/9/module-info.class")
     configurations = [project.configurations.distPack]
     archiveClassifier.set(null)
     transform(CollisionTransformer.class) {
@@ -332,6 +348,10 @@ task distCompiler(type: Copy) {
 
     from(project(':backend.native').file("build/nativelibs/$hostName")) {
         into('konan/nativelib')
+    }
+
+    from(project(':backend.native').file('build/external_jars/trove4j.jar')) {
+        into('konan/lib')
     }
 
     from(project(':Interop').file('Indexer/build/nativelibs')) {
@@ -387,9 +407,14 @@ task distDef(type: Copy) {
 
     destinationDir distDir
 
-    from(project("platformLibs").file("src/platform")) {
-        into('konan/platformDef')
-        include '**/*.def'
+    platformManager.targetValues.each { target ->
+        from(project("platformLibs").file("src/platform/${target.family.name().toLowerCase()}")) {
+            into("konan/platformDef/${target.visibleName}")
+            include '**/*.def'
+            if (target in targetsWithoutZlib) {
+                exclude '**/zlib.def'
+            }
+        }
     }
 }
 
@@ -399,7 +424,6 @@ task listDist(type: Exec) {
 
 task distRuntime(type: Copy) {
     dependsOn "${hostName}CrossDistRuntime"
-    dependsOn('commonDistRuntime')
 }
 
 task distEndorsedLibraries {
@@ -423,19 +447,8 @@ def stdlibDefaultComponent = "$stdlib/default"
 def endorsedLibs = 'klib/common/endorsedLibraries'
 def endorsedLibsBase = 'klib/common'
 
-task commonDistRuntime(type: Copy) {
-    destinationDir distDir
-
-    // Target independant common part.
-    from(project(':runtime').file("build/${hostName}Stdlib")) {
-        include('**')
-        into(stdlib)
-    }
-}
-
 task crossDistRuntime(type: Copy) {
     dependsOn.addAll(targetList.collect { "${it}CrossDistRuntime" })
-    dependsOn('commonDistRuntime')
 }
 
 task crossDistEndorsedLibraries(type: Copy) {
@@ -464,6 +477,15 @@ targetList.each { target ->
         from(project(':runtime').file("build/${target}Stdlib")) {
             include('**')
             into(stdlib)
+            eachFile {
+                if (name == 'manifest') {
+                    def existingManifest = file("$destinationDir/$path")
+                    if (existingManifest.exists()) {
+                        UtilsKt.mergeManifestsByTargets(project, file, existingManifest)
+                        exclude()
+                    }
+                }
+            }
         }
         from(project(':runtime').file("build/$target")) {
             include("runtime.bc")
@@ -501,7 +523,7 @@ targetList.each { target ->
     }
 
     task("${target}CrossDist") {
-        dependsOn "${target}CrossDistRuntime", "distCompiler", "commonDistRuntime", "${target}CrossDistEndorsedLibraries"
+        dependsOn "${target}CrossDistRuntime", "distCompiler", "${target}CrossDistEndorsedLibraries"
         if (target in cacheableTargetNames) {
             dependsOn "${target}StdlibCache", "${target}EndorsedCache"
         }
@@ -727,6 +749,7 @@ task clean {
     doLast {
         delete distDir
         delete bundle.outputs.files
+        delete "${projectDir}/compile_commands.json"
     }
 }
 
@@ -737,4 +760,19 @@ task pusher(type: KotlinBuildPusher){
     compilerConfigurationId = System.getenv("TEAMCITY_COMPILER_ID") ?: "Kotlin_KotlinDev_Compiler"
     overrideConfigurationId = System.getenv("TEAMCITY_OVERRIDE_NATIVE_ID") ?: "Kotlin_KotlinDev_DeployMavenArtifacts_OverrideNative"
     token = project.findProperty("teamcityBearToken") ?: System.getenv("TEAMCITY_BEAR_TOKEN")
+}
+
+targetList.each { target ->
+    CompilationDatabaseKt.mergeCompilationDatabases(project, "${target}CompilationDatabase".toString(), [
+            ":common:${target}CompilationDatabase".toString(),
+            ":runtime:${target}CompilationDatabase".toString()
+    ]).configure {
+        outputFile = file("$buildDir/${target}/compile_commands.json")
+    }
+}
+
+task compdb(type: Copy) {
+    dependsOn "${hostName}CompilationDatabase"
+    from "$buildDir/${hostName}/compile_commands.json"
+    into "$projectDir"
 }

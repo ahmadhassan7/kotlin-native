@@ -6,7 +6,17 @@
 #ifndef RUNTIME_MEMORYSHAREDREFS_HPP
 #define RUNTIME_MEMORYSHAREDREFS_HPP
 
+#include <type_traits>
+
 #include "Memory.h"
+
+// TODO: Generalize for uses outside this file.
+enum class ErrorPolicy {
+  kIgnore,  // Ignore any errors. (i.e. unsafe mode)
+  kDefaultValue,  // Return the default value from the function when an error happens.
+  kThrow,  // Throw a Kotlin exception when an error happens. The exact exception is chosen by the callee.
+  kTerminate,  // Terminate immediately when an error happens.
+};
 
 class KRefSharedHolder {
  public:
@@ -14,27 +24,38 @@ class KRefSharedHolder {
 
   void init(ObjHeader* obj);
 
+  // Error if called from the wrong worker with non-frozen obj_.
+  template <ErrorPolicy errorPolicy>
   ObjHeader* ref() const;
 
   void dispose() const;
 
+  OBJ_GETTER0(describe) const;
+
  private:
   ObjHeader* obj_;
   ForeignRefContext context_;
-
-  void ensureRefAccessible() const;
 };
+
+static_assert(std::is_trivially_destructible<KRefSharedHolder>::value,
+    "KRefSharedHolder destructor is not guaranteed to be called.");
 
 class BackRefFromAssociatedObject {
  public:
   void initAndAddRef(ObjHeader* obj);
 
+  // Error if refCount is zero and it's called from the wrong worker with non-frozen obj_.
+  template <ErrorPolicy errorPolicy>
   void addRef();
 
+  // Error if called from the wrong worker with non-frozen obj_.
+  template <ErrorPolicy errorPolicy>
   bool tryAddRef();
 
   void releaseRef();
 
+  // Error if called from the wrong worker with non-frozen obj_.
+  template <ErrorPolicy errorPolicy>
   ObjHeader* ref() const;
 
   inline bool permanent() const {
@@ -45,8 +66,9 @@ class BackRefFromAssociatedObject {
   ObjHeader* obj_;
   ForeignRefContext context_;
   volatile int refCount;
-
-  void ensureRefAccessible() const;
 };
+
+static_assert(std::is_trivially_destructible<BackRefFromAssociatedObject>::value,
+    "BackRefFromAssociatedObject destructor is not guaranteed to be called.");
 
 #endif // RUNTIME_MEMORYSHAREDREFS_HPP

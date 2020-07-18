@@ -5,9 +5,12 @@
 
 import shadow.org.jetbrains.kotlin.gradle.plugin.tasks.KonanCompileNativeBinary
 import org.jetbrains.kotlin.*
+import org.jetbrains.kotlin.konan.target.Family
 import org.jetbrains.kotlin.konan.target.KonanTarget
 
 import java.nio.file.Paths
+
+import static org.jetbrains.kotlin.konan.target.Architecture.*
 
 buildscript {
     repositories {
@@ -48,6 +51,7 @@ repositories {
 }
 
 dependencies {
+    compile 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.3.7'
     cli_bc project(path: ':backend.native', configuration: 'cli_bc')
     def updateTestData = true
     if (project.hasProperty("kotlinProjectPath")) {
@@ -96,6 +100,13 @@ ext.testLibraryDir = "${project.property("konan.home")}/klib/platform/${project.
 // Add executor to run tests depending on a target
 project.convention.plugins.executor = ExecutorServiceKt.create(project)
 
+
+compileTestKotlin {
+    kotlinOptions {
+        freeCompilerArgs += "-Xskip-prerelease-check"
+    }
+}
+
 // Do not generate run tasks for konan built artifacts
 ext.konanNoRun = true
 
@@ -103,12 +114,12 @@ final CacheTesting cacheTesting = CacheTestingKt.configureCacheTesting(project)
 if (cacheTesting != null) {
     // Note: can't do this in [CacheTesting.configure] since task classes aren't accessible there.
 
-    tasks.withType(KonanCompileNativeBinary.class) {
+    tasks.withType(KonanCompileNativeBinary.class).configureEach {
         dependsOn cacheTesting.buildCacheTask
         extraOpts cacheTesting.compilerArgs
     }
 
-    tasks.withType(RunExternalTestGroup.class) {
+    tasks.withType(RunExternalTestGroup.class).configureEach {
         dependsOn cacheTesting.buildCacheTask
         flags = (flags ?: []) + cacheTesting.compilerArgs
     }
@@ -117,11 +128,11 @@ if (cacheTesting != null) {
 // Enable two-stage test compilation if the test_two_stage property is set.
 ext.twoStageEnabled = project.hasProperty("test_two_stage")
 
-tasks.withType(KonanCompileNativeBinary.class) {
+tasks.withType(KonanCompileNativeBinary.class).configureEach {
     enableTwoStageCompilation = twoStageEnabled
 }
 
-tasks.withType(RunExternalTestGroup.class) {
+tasks.withType(RunExternalTestGroup.class).configureEach {
     enableTwoStageCompilation = twoStageEnabled
 }
 
@@ -145,7 +156,7 @@ allprojects {
 testOutputExternal.mkdirs()
 testOutputStdlib.mkdirs()
 
-def dist = project.rootProject.file(project.findProperty("org.jetbrains.kotlin.native.home") ?:
+ext.dist = project.rootProject.file(project.findProperty("org.jetbrains.kotlin.native.home") ?:
         project.findProperty("konan.home") ?: "dist")
 
 konanArtifacts {
@@ -208,8 +219,17 @@ def update_external_tests() {
             include 'common/**'
             include 'test/**'
             exclude 'test/js/**'
+            include 'kotlin-test/**'
         }
     }
+}
+
+void konanc(String[] args) {
+   def konancScript = isWindows() ? "konanc.bat" : "konanc"
+   def konanc = "$dist/bin/$konancScript"
+   def allArgs = args.join(" ")
+   println("$konanc $allArgs")
+   "$konanc $allArgs".execute().waitFor()
 }
 
 clean {
@@ -218,16 +238,20 @@ clean {
     }
 }
 
-TaskCollection<Task> tasksOf(Class<? extends Task> type, Closure<Boolean> filter) {
+TaskCollection<Task> tasksOf(Class<? extends Task> type, Closure<Boolean> filter = { return true }) {
     String prefix = project.findProperty("prefix")
     project.tasks.withType(type)
             .matching { filter(it) && it.enabled && (prefix != null ? it.name.startsWith(prefix) : true) }
 }
 
 run {
-    dependsOn(tasksOf(KonanTest) {})
+    dependsOn(tasksOf(KonanTest))
     // Add framework tests
-    dependsOn(tasksOf(FrameworkTest) {})
+    dependsOn(tasksOf(FrameworkTest))
+    dependsOn(tasksOf(MetadataComparisonTest))
+    // Add regular gradle test tasks
+    dependsOn(tasksOf(Test))
+    dependsOn(tasksOf(CoverageTest))
 }
 
 task sanity {
@@ -241,6 +265,13 @@ task sanity {
         task.getDependsOn().every { !platformLibsTasks.contains(it) } &&
         task.name != "library_mismatch" // This test requires the wasm32 stdlib which is unavailable during a sanity run.
     })
+    dependsOn(tasksOf(FrameworkTest) { task ->
+        task.getDependsOn().every { !platformLibsTasks.contains(it) }
+    })
+    dependsOn(tasksOf(MetadataComparisonTest))
+    // Add regular gradle test tasks
+    dependsOn(tasksOf(Test))
+    dependsOn(tasksOf(CoverageTest))
 }
 
 // Collect reports in one json.
@@ -273,13 +304,6 @@ boolean isExcluded(String dir) {
     // List of tests that fail due to unresolved compiler bugs
     def excluded = [ ]
 
-    if (project.twoStageEnabled) {
-        excluded += [
-                "codegen/box/closures/captureInSuperConstructorCall", "codegen/box/enum",  // KT-33207.
-                "codegen/box/objects" // KT-33267.
-        ]
-    }
-
     boolean result = false
     excluded.forEach {
         if (dir.endsWith(it.replace("/", File.separator))) {
@@ -289,22 +313,20 @@ boolean isExcluded(String dir) {
     return result
 }
 
-def createTestTasks(File testRoot, Class<Task> taskType, Closure taskConfiguration) {
+def createTestTasks(File testRoot, Class<Task> taskType) {
     testRoot.eachDirRecurse {
         // Skip build directory and directories without *.kt files.
         if (it.name == "build" || it.listFiles().count { it.name.endsWith(".kt") && it.isFile() } == 0) {
             return
         }
 
-        def taskDirectory = project.relativePath(it)
+        def taskDirectory = project.relativePath(it).substring("build/".length())
         if (!isExcluded(taskDirectory)) {
             def taskName = taskDirectory.replaceAll("[-/\\\\]", '_')
-
-            def task = project.task(taskName, type: taskType) {
-                groupDirectory = taskDirectory
-                finalizedBy resultsTask
+            project.tasks.register(taskName, taskType) {
+                it.groupDirectory = taskDirectory
+                it.finalizedBy resultsTask
             }
-            taskConfiguration(task)
         } else {
             println("$taskDirectory is excluded")
         }
@@ -358,7 +380,7 @@ Task linkTest(String name, Closure<KonanLinkTest> configureClosure) {
                     extraOpts task.flags
                     extraOpts project.globalTestArgs
                 }
-                UtilsKt.dependOnKonanBuildingTask(project, lib, target, task)
+                UtilsKt.dependsOnKonanBuildingTask(task, lib, target)
 
                 // Build an executable with library
                 program(name, targets: [targetName]) {
@@ -390,8 +412,9 @@ Task dynamicTest(String name, Closure<KonanDynamicTest> configureClosure) {
                     extraOpts task.flags
                     extraOpts project.globalTestArgs
                 }
-                UtilsKt.dependsOnDist(project, "compileKonan${name.capitalize()}${targetName.capitalize()}")
             }
+            def buildTask = UtilsKt.findKonanBuildTask(project, name, target)
+            UtilsKt.dependsOnDist(buildTask)
         }
     }
 }
@@ -403,10 +426,10 @@ task run_external () {
     }
 
     // Create tasks for external tests.
-    createTestTasks(externalTestsDir, RunExternalTestGroup) { }
+    createTestTasks(externalTestsDir, RunExternalTestGroup)
 
     // Set up dependencies.
-    dependsOn(tasksOf(RunExternalTestGroup) {})
+    dependsOn(tasksOf(RunExternalTestGroup))
     dependsOn("stdlibTest")
 }
 
@@ -872,6 +895,12 @@ task empty_substring(type: KonanLocalTest) {
     source = "runtime/basic/empty_substring.kt"
 }
 
+standaloneTest("worker_bound_reference0") {
+    enabled = (project.testTarget != 'wasm32') // Workers need pthreads.
+    source = "runtime/concurrent/worker_bound_reference0.kt"
+    flags = ['-tr']
+}
+
 task worker0(type: KonanLocalTest) {
     enabled = (project.testTarget != 'wasm32') // Workers need pthreads.
     goldValue = "Got Input processed\nOK\n"
@@ -1003,6 +1032,12 @@ task atomic0(type: KonanLocalTest) {
     source = "runtime/workers/atomic0.kt"
 }
 
+standaloneTest("atomic1") {
+    // Note: This test reproduces a race, so it'll start flaking if problem is reintroduced.
+    enabled = false // Needs USE_CYCLIC_GC, which is disabled.
+    source = "runtime/workers/atomic1.kt"
+}
+
 task lazy0(type: KonanLocalTest) {
     enabled = (project.testTarget != 'wasm32') // Workers need pthreads.
     goldValue = "OK\n"
@@ -1018,6 +1053,10 @@ task lazy1(type: KonanLocalTest) {
 standaloneTest("lazy2") {
     goldValue = "123\nOK\n"
     source = "runtime/workers/lazy2.kt"
+}
+
+standaloneTest("lazy3") {
+    source = "runtime/workers/lazy3.kt"
 }
 
 task enumIdentity(type: KonanLocalTest) {
@@ -1290,6 +1329,11 @@ linkTest("initializers_linkTest2") {
     lib = "codegen/initializers/linkTest2_lib.kt"
 }
 
+linkTest("initializers_sharedVarInInitBlock") {
+    source = "codegen/initializers/sharedVarInInitBlock_main.kt"
+    lib = "codegen/initializers/sharedVarInInitBlock_lib.kt"
+}
+
 task arithmetic_basic(type: KonanLocalTest) {
     source = "codegen/arithmetic/basic.kt"
 }
@@ -1446,7 +1490,7 @@ linkTest("classDelegation_linkTest") {
 }
 
 standaloneTest("contracts") {
-    flags = [ '-Xuse-experimental=kotlin.Experimental', '-tr' ]
+    flags = [ '-Xopt-in=kotlin.RequiresOptIn', '-tr' ]
     source = "codegen/contracts/contracts.kt"
 }
 
@@ -1786,6 +1830,12 @@ task coroutines_functionReference_invokeAsFunction(type: KonanLocalTest) {
 task coroutines_functionReference_lambdaAsSuspendLambda(type: KonanLocalTest) {
     goldValue = ""
     source = "codegen/coroutines/functionReference_lambdaAsSuspendLambda.kt"
+}
+
+standaloneTest('coroutines_suspendConversion') {
+    goldValue = ""
+    source = "codegen/coroutines/suspendConversion.kt"
+    flags = ['-XXLanguage:+SuspendConversion']
 }
 
 task AbstractMutableCollection(type: KonanLocalTest) {
@@ -2166,6 +2216,10 @@ task ieee754(type: KonanLocalTest) {
     source = "runtime/basic/ieee754.kt"
 }
 
+standaloneTest("hypotenuse") {
+    source = "runtime/basic/hypot.kt"
+}
+
 task array_list1(type: KonanLocalTest) {
     goldValue = "OK\n"
     source = "runtime/collections/array_list1.kt"
@@ -2266,7 +2320,7 @@ task utf8(type: KonanLocalTest) {
     // Cannot be executed in the two-stage mode due to KT-33175.
     // Uses exceptions so cannot run on wasm.
     enabled = !twoStageEnabled && (project.testTarget != 'wasm32')
-    goldValue = "Hello\nПривет\n\uD800\uDC00\n\n\uFFFD\uFFFD\n\uFFFD12\n\uFFFD12\n12\uFFFD\n\uD83D\uDE25\n\uD83D\uDE25\n\uD83D\uDE25\n"
+    goldValue = "Hello\nПривет\n\uD800\uDC00\n\n\uFFFD\uFFFD\n\uFFFD12\n\uFFFD12\n12\uFFFD\n\uD83D\uDE25\n\uD83D\uDE25\n"
     source = "runtime/text/utf8.kt"
 }
 
@@ -2299,6 +2353,18 @@ standaloneTest("check_stacktrace_format") {
     source = "runtime/exceptions/check_stacktrace_format.kt"
 }
 
+standaloneTest("stack_trace_inline") {
+    disabled = !isAppleTarget(project) || project.globalTestArgs.contains('-opt') || (project.testTarget == 'ios_arm64')
+    flags = ['-g']
+    source = "runtime/exceptions/stack_trace_inline.kt"
+}
+
+standaloneTest("kt-37572") {
+    disabled = !isAppleTarget(project) || project.globalTestArgs.contains('-opt') || (project.testTarget == 'ios_arm64')
+    flags = ['-g']
+    source = "runtime/exceptions/kt-37572.kt"
+}
+
 standaloneTest("custom_hook") {
     enabled = (project.testTarget != 'wasm32') // Uses exceptions.
     goldValue = "value 42: Error\n"
@@ -2306,17 +2372,20 @@ standaloneTest("custom_hook") {
     source = "runtime/exceptions/custom_hook.kt"
 }
 
-task runtime_math_exceptions(type: KonanLocalTest) {
+standaloneTest("runtime_math_exceptions") {
     enabled = (project.testTarget != 'wasm32')
     source = "stdlib_external/numbers/MathExceptionTest.kt"
+    flags = ['-tr']
 }
 
-task runtime_math(type: KonanLocalTest) {
+standaloneTest("runtime_math") {
     source = "stdlib_external/numbers/MathTest.kt"
+    flags = ['-tr']
 }
 
-task runtime_math_harmony(type: KonanLocalTest) {
+standaloneTest("runtime_math_harmony") {
     source = "stdlib_external/numbers/HarmonyMathTests.kt"
+    flags = ['-tr']
 }
 
 task catch3(type: KonanLocalTest) {
@@ -2672,6 +2741,15 @@ task initializers5(type: KonanLocalTest) {
     source = "runtime/basic/initializers5.kt"
 }
 
+task initializers6(type: KonanLocalTest) {
+    disabled = project.testTarget == 'wasm32' // Needs workers.
+    source = "runtime/basic/initializers6.kt"
+}
+
+task initializers7(type: KonanLocalTest) {
+    source = "runtime/basic/initializers7.kt"
+}
+
 task expression_as_statement(type: KonanLocalTest) {
     expectedFail = (project.testTarget == 'wasm32') // uses exceptions.
     goldValue = "Ok\n"
@@ -2747,9 +2825,14 @@ task memory_stable_ref_cross_thread_check(type: KonanLocalTest) {
 }
 
 standaloneTest("cycle_collector") {
-    disabled = project.globalTestArgs.contains('-opt') || (project.testTarget == 'wasm32') // Needs debug build.
+    disabled = true // Needs USE_CYCLIC_GC, which is disabled.
     flags = ['-g']
     source = "runtime/memory/cycle_collector.kt"
+}
+
+standaloneTest("cycle_collector_deadlock1") {
+    disabled = true // Needs USE_CYCLIC_GC, which is disabled.
+    source = "runtime/memory/cycle_collector_deadlock1.kt"
 }
 
 standaloneTest("leakMemory") {
@@ -3042,12 +3125,42 @@ task inlineClass_customEquals(type: KonanLocalTest) {
     source = "codegen/inlineClass/customEquals.kt"
 }
 
+task inlineClass_defaultEquals(type: KonanLocalTest) {
+    source = "codegen/inlineClass/defaultEquals.kt"
+}
+
 task deserialized_inline0(type: KonanLocalTest) {
     source = "serialization/deserialized_inline0.kt"
 }
 
 task deserialized_listof0(type: KonanLocalTest) {
     source = "serialization/deserialized_listof0.kt"
+}
+
+task genKt39548 {
+    doFirst {
+        GenTestKT39548Kt.genTestKT39548(file("$buildDir/kt39548/kt39548.kt"))
+    }
+}
+
+KotlinNativeTestKt.createTest(project, "kt39548", KonanStandaloneTest) { task ->
+    // Test infrastructure doesn't support generated source;
+    // workaround by specifying dummy source:
+    task.source = "does/not/exist/kt39548.dummy.kt"
+    task.enabled = isWindowsTarget(project)
+
+    if (task.enabled) {
+        konanArtifacts {
+            program(name, targets: [target.name]) {
+                baseDir   "$testOutputLocal/$name"
+                srcFiles  "$buildDir/kt39548/kt39548.kt" // Generated by genKt39548 task.
+                extraOpts task.flags
+                extraOpts project.globalTestArgs
+            }
+        }
+
+        UtilsKt.findKonanBuildTask(project, name, target).dependsOn(genKt39548)
+    }
 }
 
 linkTest("deserialized_members") {
@@ -3292,6 +3405,24 @@ linkTest("inline_defaultArgs_linkTest") {
     lib = "codegen/inline/defaultArgs_linkTest_lib.kt"
 }
 
+linkTest("inline_sharedVar_linkTest") {
+    goldValue = "6\n"
+    source = "codegen/inline/sharedVar_linkTest_main.kt"
+    lib = "codegen/inline/sharedVar_linkTest_lib.kt"
+}
+
+linkTest("inline_lateinitProperty_linkTest") {
+    disabled = (project.testTarget == 'wasm32') // Uses exceptions.
+    goldValue = "OK\n"
+    source = "codegen/inline/lateinitProperty_linkTest_main.kt"
+    lib = "codegen/inline/lateinitProperty_linkTest_lib.kt"
+}
+
+linkTest("inline_inlineCtor_linkTest") {
+    source = "codegen/inline/inlineCtor_linkTest_main.kt"
+    lib = "codegen/inline/inlineCtor_linkTest_lib.kt"
+}
+
 def generateWithSpaceDefFile() {
     def mapOption = "--Map \"${buildDir}/cutom map.map\""
     if (isAppleTarget(project)) {
@@ -3379,6 +3510,10 @@ createInterop("cvalues") {
     it.defFile 'interop/basics/cvalues.def'
 }
 
+createInterop("cvectors") {
+    it.defFile 'interop/basics/cvectors.def'
+}
+
 createInterop("cstructs") {
     it.defFile 'interop/basics/cstructs.def'
 }
@@ -3395,6 +3530,26 @@ createInterop("cmangling2") {
     it.defFile 'interop/basics/mangling2.def'
 }
 
+createInterop("cmangling_keywords") {
+    it.defFile 'interop/basics/mangling_keywords.def'
+}
+
+createInterop("cmangling_keywords2") {
+    it.defFile 'interop/basics/mangling_keywords2.def'
+}
+
+createInterop("cunion") {
+    it.defFile 'interop/basics/cunion.def'
+}
+
+createInterop("cenums") {
+    it.defFile 'interop/basics/cenums.def'
+}
+
+createInterop("carrayPointers") {
+    it.defFile 'interop/basics/carrayPointers.def'
+}
+
 createInterop("auxiliaryCppSources") {
     // We need to provide empty def file to create correct `KonanInteropTask`.
     it.defFile 'interop/auxiliary_sources/auxiliaryCppSources.def'
@@ -3403,10 +3558,37 @@ createInterop("auxiliaryCppSources") {
     it.extraOpts "-Xsource-compiler-option", "-std=c++17"
 }
 
+createInterop("embedStaticLibraries") {
+    it.defFile 'interop/embedStaticLibraries/embedStaticLibraries.def'
+    it.headers "$projectDir/interop/embedStaticLibraries/embedStaticLibraries.h"
+
+    // Note: also hardcoded in def file.
+    final String libDir = "$buildDir/embedStaticLibraries/"
+
+    it.getByTarget(target.name).doFirst {
+        1.upto(4) {
+            UtilsKt.buildStaticLibrary(
+                    project,
+                    [file("$projectDir/interop/embedStaticLibraries/${it}.c")],
+                    file("$libDir/${it}.a"),
+                    file("$libDir/${it}.objs"),
+            )
+        }
+    }
+
+    it.extraOpts '-staticLibrary', "$libDir/1.a"
+    it.extraOpts '-staticLibrary', "$libDir/2.a"
+}
+
 if (PlatformInfo.isAppleTarget(project)) {
     createInterop("objcSmoke") {
         it.defFile 'interop/objc/objcSmoke.def'
         it.headers "$projectDir/interop/objc/smoke.h"
+    }
+
+    createInterop("objcTests") {
+        it.defFile 'interop/objc/objcTests.def'
+        it.headers fileTree("$projectDir/interop/objc/tests") { include '**/*.h' }
     }
 
     createInterop("objcMisc") {
@@ -3430,6 +3612,10 @@ if (PlatformInfo.isAppleTarget(project)) {
         it.headers "$projectDir/framework/gh3343/objclib.h"
         it.linkerOpts "-lobjcgh3343"
     }
+    createInterop("objc_illegal_sharing_with_weak") {
+      it.defFile 'interop/objc/illegal_sharing_with_weak/objclib.def'
+      it.headers "$projectDir/interop/objc/illegal_sharing_with_weak/objclib.h"
+    }
 }
 
 createInterop("withSpaces") {
@@ -3439,19 +3625,19 @@ createInterop("withSpaces") {
 /**
  * Creates a task for the interop test. Configures runner and adds library and test build tasks.
  */
-Task interopTest(String name, Closure<KonanInteropTest> configureClosure) {
+Task interopTestBase(String name, boolean multiFile, Closure<KonanInteropTest> configureClosure) {
     return KotlinNativeTestKt.createTest(project, name, KonanInteropTest) { task ->
         task.configure(configureClosure)
         if (task.enabled) {
             konanArtifacts {
                 def lib = task.interop
-                UtilsKt.dependOnKonanBuildingTask(project, lib, target, task)
+                UtilsKt.dependsOnKonanBuildingTask(task, lib, target)
 
                 program(name, targets: [target.name]) {
                     libraries {
                         artifact lib
                     }
-                    srcFiles task.getSources()
+                    srcFiles multiFile ? fileTree(task.source) { include '**/*.kt' } : task.getSources()
                     baseDir "$testOutputLocal/$name"
                     linkerOpts "-L$buildDir"
                     extraOpts task.flags
@@ -3462,6 +3648,13 @@ Task interopTest(String name, Closure<KonanInteropTest> configureClosure) {
     }
 }
 
+Task interopTest(String name, Closure<KonanInteropTest> configureClosure) {
+    return interopTestBase(name, false, configureClosure)
+}
+
+Task interopTestMultifile(String name, Closure<KonanInteropTest> configureClosure) {
+    return interopTestBase(name, true, configureClosure)
+}
 
 standaloneTest("interop_objc_allocException") {
     dependsOnPlatformLibs(it)
@@ -3560,6 +3753,20 @@ interopTest("interop_types") {
     interop = 'ctypes'
 }
 
+interopTest("interop_vectors") {
+    disabled = (project.testTarget == 'wasm32') // No interop for wasm yet.
+    source = "interop/basics/vectors.kt"
+    interop = 'cvectors'
+}
+
+interopTest("interop_vectors_mimalloc") {
+    disabled = (project.testTarget == 'wasm32') // No interop for wasm yet.
+    source = "interop/basics/vectors.kt"
+    interop = 'cvectors'
+    flags = [ "-Xallocator=mimalloc" ]
+    arguments = [ "mimalloc" ]
+}
+
 interopTest("interop_mangling") {
     disabled = (project.testTarget == 'wasm32') // No interop for wasm yet.
     source = "interop/basics/mangling.kt"
@@ -3572,10 +3779,28 @@ interopTest("interop_mangling2") {
     interop = 'cmangling2'
 }
 
+interopTest("interop_mangling_keywords") {
+    disabled = (project.testTarget == 'wasm32') // No interop for wasm yet.
+    source = "interop/basics/mangling_keywords.kt"
+    interop = 'cmangling_keywords'
+}
+
+interopTest("interop_mangling_keywords2") {
+    disabled = (project.testTarget == 'wasm32') // No interop for wasm yet.
+    source = "interop/basics/mangling_keywords2.kt"
+    interop = 'cmangling_keywords2'
+}
+
 interopTest("interop_auxiliarySources") {
     disabled = (project.testTarget == 'wasm32') // No interop for wasm yet.
     source = "interop/auxiliary_sources/main.kt"
     interop = 'auxiliaryCppSources'
+}
+
+interopTest("interop_embedStaticLibraries") {
+    disabled = (project.testTarget == 'wasm32') // No interop for wasm yet.
+    source = "interop/embedStaticLibraries/main.kt"
+    interop = 'embedStaticLibraries'
 }
 
 interopTest("interop_values") {
@@ -3604,6 +3829,24 @@ interopTest("interop_withSpaces") {
     doLast {
         assert file("${buildDir}/cutom map.map").exists()
     }
+}
+
+interopTest("interop_union") {
+    disabled = (project.testTarget == 'wasm32') // No interop for wasm yet.
+    interop = 'cunion'
+    source = "interop/basics/union.kt"
+}
+
+interopTest("interop_enums") {
+    disabled = (project.testTarget == 'wasm32') // No interop for wasm yet.
+    interop = 'cenums'
+    source = "interop/basics/enums.kt"
+}
+
+interopTest("interop_array_pointers") {
+    disabled = (project.testTarget == 'wasm32') // No interop for wasm yet.
+    interop = 'carrayPointers'
+    source = "interop/basics/arrayPointers.kt"
 }
 
 task interop_convert(type: KonanLocalTest) {
@@ -3645,17 +3888,14 @@ if (PlatformInfo.isAppleTarget(project)) {
         source = "interop/objc/smoke.kt"
         interop = 'objcSmoke'
 
-        if (twoStageEnabled) {
-            // Without this flag the test fails in the two-stage mode due to KT-33160.
-            // TODO: Remove this flag when the bug is fixed.
-            flags += "-nodefaultlibs"
-        }
-
         doBeforeBuild {
+            mkdir(buildDir)
             execKonanClang(project.target) {
                 args "$projectDir/interop/objc/smoke.m"
                 args "-lobjc", '-fobjc-arc'
                 args '-fPIC', '-shared', '-o', "$buildDir/libobjcsmoke.dylib"
+                // Enable ARC optimizations to prevent some objects from leaking in Obj-C code due to exceptions:
+                args '-O2'
             }
             if (project.target instanceof KonanTarget.IOS_X64) {
                 UtilsKt.codesign(project, "$buildDir/libobjcsmoke.dylib")
@@ -3668,6 +3908,26 @@ if (PlatformInfo.isAppleTarget(project)) {
         }
     }
 
+    interopTestMultifile("interop_objc_tests") {
+        source = "interop/objc/tests/"
+        interop = 'objcTests'
+        flags = ['-tr', '-e', 'main']
+
+        doBeforeBuild {
+            mkdir(buildDir)
+            execKonanClang(project.target) {
+                args fileTree("$projectDir/interop/objc/tests/") { include '**/*.m' }
+                args "-lobjc", '-fobjc-arc'
+                args '-fPIC', '-shared', '-o', "$buildDir/libobjctests.dylib"
+                // Enable ARC optimizations to prevent some objects from leaking in Obj-C code due to exceptions:
+                args '-O2'
+            }
+            if (project.target instanceof KonanTarget.IOS_X64) {
+                UtilsKt.codesign(project, "$buildDir/libobjctests.dylib")
+            }
+        }
+    }
+
     interopTest("interop_objc_global_initializer") {
         goldValue = "OK\n"
         source = "interop/objc_with_initializer/objc_test.kt"
@@ -3675,6 +3935,7 @@ if (PlatformInfo.isAppleTarget(project)) {
         flags = ['-g']
 
         doBeforeBuild {
+            mkdir(buildDir)
             execKonanClang(project.target) {
                 args "$projectDir/interop/objc_with_initializer/objc_misc.m"
                 args "-lobjc", '-fobjc-arc'
@@ -3691,6 +3952,7 @@ if (PlatformInfo.isAppleTarget(project)) {
         interop = 'objcMessaging'
 
         doBeforeBuild {
+            mkdir(buildDir)
             execKonanClang(project.target) {
                 args "$projectDir/interop/objc/msg_send/messaging.m"
                 args "-lobjc", '-fobjc-arc'
@@ -3706,6 +3968,18 @@ if (PlatformInfo.isAppleTarget(project)) {
         source = "interop/objc/kt34467/foo.kt"
         interop = 'objcKt34467'
         goldValue = "OK\n42\n"
+    }
+
+    interopTest("interop_objc_illegal_sharing_with_weak") {
+        source = "interop/objc/illegal_sharing_with_weak/main.kt"
+        interop = 'objc_illegal_sharing_with_weak'
+
+        expectedExitStatusChecker = { it != 0 }
+        outputChecker = {
+            it.startsWith("Before") &&                   // Should crash after "Before"
+                !it.contains("After") &&                 // But before "After"
+                it.contains("isObjectAliveShouldCrash")  // And should contain stack trace.
+        }
     }
 }
 
@@ -3736,6 +4010,16 @@ standaloneTest("interop_zlib") {
     enabled = (project.testTarget == null)
     source = "interop/platform_zlib.kt"
     goldValue = "Hello!\nHello!\n"
+}
+
+standaloneTest("interop_objc_illegal_sharing") {
+    dependsOnPlatformLibs(it)
+    disabled = !isAppleTarget(project)
+    source = "interop/objc/illegal_sharing.kt"
+    expectedExitStatusChecker = { it != 0 }
+    outputChecker = {
+      it.startsWith("Before") && !it.contains("After")
+    }
 }
 
 dynamicTest("produce_dynamic") {
@@ -3781,12 +4065,10 @@ task library_mismatch(type: KonanDriverTest) {
     }
 
     doBeforeBuild {
-        def konancScript = isWindows() ? "konanc.bat" : "konanc"
-        def konanc = "$dist/bin/$konancScript"
-        "$konanc $lib -p library -o $dir/1.2/empty -target $currentTarget -lv 1.2".execute().waitFor()
-        "$konanc $lib -p library -o $dir/3.4/empty -target $someOtherTarget".execute().waitFor()
-        "$konanc $lib -p library -o $dir/5.6/empty -target $currentTarget -lv 5.6".execute().waitFor()
-        "$konanc $lib -p library -o $dir/7.8/empty -target $currentTarget -lv 7.8".execute().waitFor()
+        konanc("$lib -p library -o $dir/1.2/empty -target $currentTarget -lv 1.2")
+        konanc("$lib -p library -o $dir/3.4/empty -target $someOtherTarget")
+        konanc("$lib -p library -o $dir/5.6/empty -target $currentTarget -lv 5.6")
+        konanc("$lib -p library -o $dir/7.8/empty -target $currentTarget -lv 7.8")
 
     }
     source = "link/versioning/hello.kt"
@@ -3812,10 +4094,8 @@ task library_ir_provider_mismatch(type: KonanDriverTest) {
     def currentTarget = project.target.name
 
     doBeforeBuild {
-        def konancScript = isWindows() ? "konanc.bat" : "konanc"
-        def konanc = "$dist/bin/$konancScript"
-        "$konanc $lib -p library -o $dir/supported_ir_provider/empty -target $currentTarget".execute().waitFor()
-        "$konanc $lib -p library -o $dir/unsupported_ir_provider/empty -manifest $invalidManifest -target $currentTarget".execute().waitFor()
+        konanc("$lib -p library -o $dir/supported_ir_provider/empty -target $currentTarget")
+        konanc("$lib -p library -o $dir/unsupported_ir_provider/empty -manifest $invalidManifest -target $currentTarget")
 
     }
     source = "link/ir_providers/hello.kt"
@@ -3832,13 +4112,63 @@ task library_ir_provider_mismatch(type: KonanDriverTest) {
     }
 }
 
-if (isAppleTarget(project)) {
-    task testObjCExport(type: FrameworkTest) {
-        final String frameworkName = 'Kt'
-        testName = "ObjCExport"
-        frameworkNames = [frameworkName]
+standaloneTest("fake_override_0") {
+    def sources = "$projectDir/link/fake_overrides"
+    def dir = buildDir.absolutePath
+    doBeforeBuild {
+        konanc("$sources/base.kt -p library -target ${target.name} -o $dir/base")
+        konanc("$sources/move.kt -p library -target ${target.name} -o $dir/move -r $dir -l base")
+        konanc("$sources/use.kt -p library -target ${target.name} -o $dir/use -r $dir -l move")
+        konanc("$sources/move2.kt -p library -target ${target.name} -o $dir/move -r $dir -l base")
+    }
+    source = "$sources/main.kt"
+    flags = ["-l", "use", "-r", "$dir"]
+    goldValue = "Moved\nMoved\nChild\nSuper\n"
+}
 
-        final String dir = "$testOutputFramework/$testName"
+Task frameworkTest(String name, Closure<FrameworkTest> configurator) {
+    return KotlinNativeTestKt.createTest(project, name, FrameworkTest) { task ->
+        configurator.delegate = task
+        configurator()
+        if (task.enabled) {
+            konanArtifacts {
+                task.frameworks.forEach { fr ->
+                    framework(fr.name, targets: [target.name]) {
+                        fr.sources.forEach { src ->
+                            srcFiles src
+                        }
+                        baseDir "$testOutputFramework/${task.name}"
+
+                        if (fr.library != null) {
+                            dependsOn konanArtifacts[fr.library].getByTarget(target.name)
+                            libraries {
+                                file konanArtifacts[fr.library].getArtifactByTarget(target.name)
+                            }
+                            linkerOpts "-L$buildDir"
+                            UtilsKt.dependsOnKonanBuildingTask(task, fr.library, target)
+                        }
+
+                        if (!useCustomDist) {
+                            dependsOn ":${target.name}CrossDistRuntime", ':distCompiler'
+                        }
+
+                        extraOpts fr.bitcode ? "-Xembed-bitcode" : "-Xembed-bitcode-marker"
+                        if (fr.isStatic) extraOpts "-Xstatic-framework"
+                        extraOpts fr.opts
+                        extraOpts project.globalTestArgs
+
+                        artifactName fr.artifact
+                    }
+                }
+            }
+        }
+    }
+}
+
+if (isAppleTarget(project)) {
+    frameworkTest('testObjCExport') {
+        final String frameworkName = 'Kt'
+        final String dir = "$testOutputFramework/testObjCExport"
         final File lazyHeader = file("$dir/$target-lazy.h")
 
         doLast {
@@ -3863,137 +4193,96 @@ if (isAppleTarget(project)) {
 
         }
 
+        def libraryName = frameworkName + "Library"
         konanArtifacts {
-            framework(frameworkName, targets: [target.name]) {
-                srcDir 'objcexport'
-                baseDir dir
+            library(libraryName, targets: [target.name]) {
+                srcDir "objcexport/library"
+                artifactName "test-library"
 
                 if (!useCustomDist) {
-                    dependsOn ":${target.name}CrossDistRuntime", ':commonDistRuntime', ':distCompiler'
+                    dependsOn ":${target.name}CrossDistRuntime", ':distCompiler'
                 }
 
-                extraOpts "-Xembed-bitcode-marker"
-                extraOpts "-Xemit-lazy-objc-header=$lazyHeader"
-                extraOpts project.globalTestArgs
+                extraOpts "-Xshort-module-name=MyLibrary"
+                extraOpts "-module-name", "org.jetbrains.kotlin.native.test-library"
             }
         }
-        swiftSources = fileTree('objcexport') {
-            include '*.swift'
-        }*.absolutePath
+        framework(frameworkName) {
+            sources = ['objcexport']
+            library = libraryName
+            opts = ["-Xemit-lazy-objc-header=$lazyHeader", "-Xopt-in=kotlin.ExperimentalStdlibApi"]
+        }
+        swiftSources = ['objcexport']
     }
 
-    task testValuesGenericsFramework(type: FrameworkTest) {
-        final String frameworkName = 'ValuesGenerics'
-        testName = frameworkName
-        frameworkNames = [frameworkName]
+    frameworkTest('testObjCExportStatic') {
+        final String frameworkName = 'KtStatic'
+        final String frameworkArtifactName = 'Kt'
+        final String libraryName = frameworkName + "Library"
+
         konanArtifacts {
-            framework(frameworkName, targets: [ target ]) {
-                srcFiles 'objcexport/values.kt'
-                srcDir 'framework/values_generics'
-                baseDir "$testOutputFramework/$testName"
+            library(libraryName, targets: [target.name]) {
+                srcDir "objcexport/library"
+                artifactName "test-library"
 
                 if (!useCustomDist) {
-                    dependsOn ":${target}CrossDistRuntime", ':commonDistRuntime', ':distCompiler'
+                    dependsOn ":${target.name}CrossDistRuntime", ':distCompiler'
                 }
 
-                extraOpts "-Xembed-bitcode-marker"
-                extraOpts project.globalTestArgs
+                extraOpts "-Xshort-module-name=MyLibrary"
+                extraOpts "-module-name", "org.jetbrains.kotlin.native.test-library"
             }
         }
-        swiftSources = ['framework/values_generics/values.swift']
+
+        codesign = false
+        framework(frameworkName) {
+            sources = ['objcexport']
+            bitcode = false
+            artifact = frameworkArtifactName
+            library = libraryName
+            isStatic = true
+            opts = ['-Xstatic-framework', "-Xopt-in=kotlin.ExperimentalStdlibApi"]
+        }
+        swiftSources = ['objcexport']
     }
 
-    task testStdlibFramework(type: FrameworkTest) {
-        final String frameworkName = 'Stdlib'
-        testName = frameworkName
-        frameworkNames = [frameworkName]
+    frameworkTest('testValuesGenericsFramework') {
+        framework('ValuesGenerics') {
+            sources = ['objcexport/values.kt', 'framework/values_generics']
+        }
+        swiftSources = ['framework/values_generics/']
+    }
+
+    frameworkTest("testStdlibFramework") {
+        framework('Stdlib') {
+            sources = ['framework/stdlib']
+            bitcode = true
+        }
         if (cacheTesting == null) fullBitcode = true
-        konanArtifacts {
-            framework(frameworkName, targets: [target.name]) {
-                srcDir 'framework/stdlib'
-                baseDir "$testOutputFramework/$testName"
-
-                if (!useCustomDist) {
-                    dependsOn ":${target.name}CrossDistRuntime", ':commonDistRuntime', ':distCompiler'
-                }
-
-                extraOpts "-Xembed-bitcode"
-                extraOpts project.globalTestArgs
-            }
-        }
-        swiftSources = ['framework/stdlib/stdlib.swift']
+        swiftSources = ['framework/stdlib/']
     }
 
     if (cacheTesting != null && cacheTesting.isDynamic) {
         // testMultipleFrameworks disabled until https://youtrack.jetbrains.com/issue/KT-34262 is fixed.
-    } else task testMultipleFrameworks(type: FrameworkTest) {
-        testName = "MultipleFrameworks"
-        final String firstFrameworkName = 'First'
-        final String secondFrameworkName = 'Second'
-        frameworkNames = [firstFrameworkName, secondFrameworkName]
-
-        final String dir = "$testOutputFramework/$testName"
-
-        konanArtifacts {
-            framework(firstFrameworkName, targets: [target.name]) {
-                srcDir 'framework/multiple/framework1'
-                srcDir 'framework/multiple/shared'
-                baseDir dir
-
-                if (!useCustomDist) {
-                    dependsOn ":${target.name}CrossDistRuntime", ':commonDistRuntime', ':distCompiler'
-                }
-
-                extraOpts "-Xembed-bitcode"
-                extraOpts project.globalTestArgs
-            }
-
-            framework(secondFrameworkName, targets: [target.name]) {
-                srcDir 'framework/multiple/framework2'
-                srcDir 'framework/multiple/shared'
-                baseDir dir
-
-                if (!useCustomDist) {
-                    dependsOn ":${target.name}CrossDistRuntime", ':commonDistRuntime', ':distCompiler'
-                }
-
-                extraOpts "-Xembed-bitcode"
-                extraOpts project.globalTestArgs
-            }
+    } else frameworkTest("testMultipleFrameworks") {
+        framework('First') {
+            sources = ['framework/multiple/framework1', 'framework/multiple/shared']
+            bitcode = true
         }
-        swiftSources = ['framework/multiple/multiple.swift']
+        framework('Second') {
+            sources = ['framework/multiple/framework2', 'framework/multiple/shared']
+            bitcode = true
+        }
+        swiftSources = ['framework/multiple']
     }
 
-    task testGh3343Framework(type: FrameworkTest) {
-        final String frameworkName = 'Gh3343'
-        testName = frameworkName
-        frameworkNames = [frameworkName]
-
-        def mainTask = it
-
-        konanArtifacts {
-            def lib = "objcGh3343"
-            UtilsKt.dependOnKonanBuildingTask(project, lib, target, mainTask)
-
-            framework(frameworkName, targets: [ target ]) {
-                libraries {
-                    artifact lib
-                }
-                srcDir 'framework/gh3343'
-                baseDir "$testOutputFramework/$testName"
-
-                if (!useCustomDist) {
-                    dependsOn ":${target}CrossDistRuntime", ':commonDistRuntime', ':distCompiler'
-                }
-
-                linkerOpts "-L$buildDir"
-                extraOpts "-Xembed-bitcode-marker"
-                extraOpts project.globalTestArgs
-            }
+    frameworkTest("testGh3343Framework") {
+        framework('Gh3343') {
+            sources = ['framework/gh3343']
+            library = 'objcGh3343'
         }
-        swiftSources = ['framework/gh3343/uselib.swift']
+        swiftSources = ['framework/gh3343/']
     }
-
 }
 
 /**
@@ -4075,6 +4364,7 @@ if (UtilsKt.getTestTargetSupportsCodeCoverage(project)) {
         binaryName = "CoverageControlFlow"
         numberOfCoveredFunctions = 1
         numberOfCoveredLines = 102
+        enabled = !twoStageEnabled
 
         konanArtifacts {
             program(binaryName, targets: [ target ]) {
@@ -4120,6 +4410,7 @@ if (UtilsKt.getTestTargetSupportsCodeCoverage(project)) {
         binaryName = "CoverageSmoke1"
         numberOfCoveredFunctions = 9
         numberOfCoveredLines = 33
+        enabled = !twoStageEnabled
 
         konanArtifacts {
             program(binaryName, targets: [ target ]) {
@@ -4130,6 +4421,11 @@ if (UtilsKt.getTestTargetSupportsCodeCoverage(project)) {
             }
         }
     }
+}
+
+task metadata_compare_typedefs(type: MetadataComparisonTest) {
+    enabled = (project.testTarget != 'wasm32')
+    defFile = "interop/basics/typedefs.def"
 }
 
 /**
@@ -4148,7 +4444,7 @@ KotlinNativeTestKt.createTest(project, 'stdlibTest', KonanGTest) { task ->
             baseDir "$testOutputStdlib/stdlibTest"
             enableMultiplatform true
             extraOpts '-tr',
-                    '-Xuse-experimental=kotlin.Experimental,kotlin.ExperimentalStdlibApi',
+                    '-Xopt-in=kotlin.RequiresOptIn,kotlin.ExperimentalStdlibApi',
                     "-friend-modules", project.rootProject.file("${project.properties['konan.home']}/klib/common/stdlib").absolutePath
             extraOpts project.globalTestArgs
         }
@@ -4158,6 +4454,7 @@ KotlinNativeTestKt.createTest(project, 'stdlibTest', KonanGTest) { task ->
     task.useFilter = false
     task.testLogger = KonanTest.Logger.GTEST
     task.finalizedBy("resultsTask")
+    task.enabled = (project.testTarget != 'wasm32')  // Uses exceptions
 }
 
 /**
@@ -4169,7 +4466,7 @@ task buildKonanTests { t ->
     // These tests should not be built into the TestRunner's test executable
     def excludeList = [ "codegen/inline/returnLocalClassFromBlock.kt" ]
     project.tasks
-            .matching { it instanceof KonanStandaloneTest }
+            .withType(KonanStandaloneTest.class)
             .each {
                 // add library and source files
                 if (it instanceof KonanLinkTest) {
@@ -4192,11 +4489,13 @@ task buildKonanTests { t ->
 
     // Set build dependencies.
     dependsOn compileKonanLocalTest
-    UtilsKt.dependsOnDist(project, "compileKonanLocalTest${target.name.capitalize()}")
+    def buildTask = UtilsKt.findKonanBuildTask(project, "localTest", target)
+    UtilsKt.dependsOnDist(buildTask)
 
     // Local tests build into a single binary should depend on this task
     project.tasks
-            .matching { !(it instanceof KonanStandaloneTest) && it instanceof KonanLocalTest }
+            .withType(KonanLocalTest.class)
+            .matching { !(it instanceof KonanStandaloneTest) }
             .forEach { it.dependsOn(t) }
 }
 
@@ -4205,6 +4504,11 @@ sourceSets {
     nopPlugin {
         kotlin {
             srcDir 'extensions/nop/src/main/kotlin'
+        }
+    }
+    test {
+        kotlin {
+            srcDir 'debugger/src/test/kotlin'
         }
     }
 }
@@ -4243,17 +4547,34 @@ pluginTest("runtime_basic_init", "nopPlugin") {
 
 dependencies {
     nopPluginCompile kotlinCompilerModule
+    compile kotlinCompilerModule
+    compile project(path: ':backend.native', configuration: 'cli_bc')
+    compile 'junit:junit:4.12'
 }
 
-// Configure ios build
-if (PlatformInfo.getTarget(project) == KonanTarget.IOS_ARM64.INSTANCE) {
+project.tasks.named("test").configure {
+    // Don't run this task as it will try to execute debugger tests too
+    // that is not desired as they are platform-specific.
+    enabled = false
+}
+
+project.tasks.register("debugger_test", Test.class) {
+    enabled = (target.family == Family.OSX)  // KT-30366
+    testLogging { exceptionFormat = 'full' }
+    UtilsKt.dependsOnDist(it)
+    systemProperties = ['kotlin.native.home': dist]
+}
+
+// Configure build for iOS device targets.
+if (target.family == Family.IOS && (target.architecture == ARM32 || target.architecture == ARM64)) {
     project.tasks
-            .matching { it instanceof KonanTestExecutable }
+            .withType(KonanTestExecutable.class)
             .forEach {
                 ExecutorServiceKt.configureXcodeBuild((KonanTestExecutable) it)
             }
-    // Exclude tasks that can not be run on device
+    // Exclude tasks that cannot be run on device
     project.tasks
+            .withType(KonanTest.class)
             .matching { (it instanceof KonanLocalTest && ((KonanLocalTest) it).testData != null) ||
                     // Filter out tests that depend on libs. TODO: copy them too
                     it instanceof KonanInteropTest ||

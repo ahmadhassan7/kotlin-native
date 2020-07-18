@@ -11,8 +11,6 @@ import org.jetbrains.kotlin.library.impl.createKotlinLibrary
 import org.jetbrains.kotlin.util.DummyLogger
 import org.jetbrains.kotlin.util.Logger
 
-const val KONAN_STDLIB_NAME = "stdlib"
-
 interface SearchPathResolverWithTarget<L: KotlinLibrary>: SearchPathResolverWithAttributes<L> {
     val target: KonanTarget
 }
@@ -20,7 +18,7 @@ interface SearchPathResolverWithTarget<L: KotlinLibrary>: SearchPathResolverWith
 fun defaultResolver(
         repositories: List<String>,
         target: KonanTarget,
-        distribution: Distribution = Distribution(),
+        distribution: Distribution,
         compatibleCompilerVersions: List<CompilerVersion> = emptyList()
 ): SearchPathResolverWithTarget<KonanLibrary> = defaultResolver(repositories, emptyList(), target, distribution, compatibleCompilerVersions)
 

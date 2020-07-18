@@ -85,7 +85,16 @@ internal val IrClass.writableTypeInfoSymbolName: String
         return "ktypew:" + this.fqNameForIrSerialization.toString()
     }
 
-internal val IrClass.objectInstanceGetterSymbolName: String
+internal val IrClass.globalObjectStorageSymbolName: String
+    get() {
+        assert (this.isExported())
+        assert (this.kind.isSingleton)
+        assert (!this.isUnit())
+
+        return "kobjref:$fqNameForIrSerialization"
+    }
+
+internal val IrClass.threadLocalObjectStorageGetterSymbolName: String
     get() {
         assert (this.isExported())
         assert (this.kind.isSingleton)
@@ -124,7 +133,7 @@ internal fun RuntimeAware.getLlvmFunctionType(function: IrFunction): LLVMTypeRef
         paramTypes.add(kObjHeaderPtr)                       // Suspend functions have implicit parameter of type Continuation<>.
     if (isObjectType(returnType)) paramTypes.add(kObjHeaderPtrPtr)
 
-    return functionType(returnType, isVarArg = false, paramTypes = *paramTypes.toTypedArray())
+    return functionType(returnType, isVarArg = false, paramTypes = paramTypes.toTypedArray())
 }
 
 internal val IrClass.typeInfoHasVtableAttached: Boolean

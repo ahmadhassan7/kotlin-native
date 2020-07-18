@@ -20,24 +20,28 @@ import org.jetbrains.kotlin.konan.file.File
 import org.jetbrains.kotlin.konan.library.KonanLibrary
 import org.jetbrains.kotlin.konan.properties.loadProperties
 import org.jetbrains.kotlin.konan.target.*
+import org.jetbrains.kotlin.konan.util.KonanHomeProvider
 import org.jetbrains.kotlin.library.KotlinLibrary
 import org.jetbrains.kotlin.library.resolver.TopologicalLibraryOrder
+import org.jetbrains.kotlin.utils.addToStdlib.cast
 
 class KonanConfig(val project: Project, val configuration: CompilerConfiguration) {
 
     internal val distribution = Distribution(
-        false,
-        null,
-        configuration.get(KonanConfigKeys.RUNTIME_FILE))
+            configuration.get(KonanConfigKeys.KONAN_HOME) ?: KonanHomeProvider.determineKonanHome(),
+            false,
+            configuration.get(KonanConfigKeys.RUNTIME_FILE)
+    )
 
-    internal val platformManager = PlatformManager(distribution)
+    private val platformManager = PlatformManager(distribution)
     internal val targetManager = platformManager.targetManager(configuration.get(KonanConfigKeys.TARGET))
     internal val target = targetManager.target
     internal val phaseConfig = configuration.get(CLIConfigurationKeys.PHASE_CONFIG)!!
 
     // TODO: debug info generation mode and debug/release variant selection probably requires some refactoring.
     val debug: Boolean get() = configuration.getBoolean(KonanConfigKeys.DEBUG)
-    val lightDebug: Boolean get() = configuration.getBoolean(KonanConfigKeys.LIGHT_DEBUG)
+    val lightDebug: Boolean = configuration.get(KonanConfigKeys.LIGHT_DEBUG)
+            ?: target.family.isAppleFamily // Default is true for Apple targets.
 
     val memoryModel: MemoryModel get() = configuration.get(KonanConfigKeys.MEMORY_MODEL)!!
 
@@ -94,18 +98,20 @@ class KonanConfig(val project: Project, val configuration: CompilerConfiguration
     val moduleId: String
         get() = configuration.get(KonanConfigKeys.MODULE_NAME) ?: File(outputFiles.outputName).name
 
+    val shortModuleName: String?
+        get() = configuration.get(KonanConfigKeys.SHORT_MODULE_NAME)
+
     val infoArgsOnly = configuration.kotlinSourceRoots.isEmpty()
             && configuration[KonanConfigKeys.INCLUDED_LIBRARIES].isNullOrEmpty()
             && librariesToCache.isEmpty()
 
     fun librariesWithDependencies(moduleDescriptor: ModuleDescriptor?): List<KonanLibrary> {
         if (moduleDescriptor == null) error("purgeUnneeded() only works correctly after resolve is over, and we have successfully marked package files as needed or not needed.")
-
-        return resolvedLibraries.filterRoots { (!it.isDefault && !this.purgeUserLibs) || it.isNeededForLink }.getFullList(TopologicalLibraryOrder) as List<KonanLibrary>
+        return resolvedLibraries.filterRoots { (!it.isDefault && !this.purgeUserLibs) || it.isNeededForLink }.getFullList(TopologicalLibraryOrder).cast()
     }
 
     val shouldCoverSources = configuration.getBoolean(KonanConfigKeys.COVERAGE)
-    val shouldCoverLibraries = !configuration.getList(KonanConfigKeys.LIBRARIES_TO_COVER).isNullOrEmpty()
+    private val shouldCoverLibraries = !configuration.getList(KonanConfigKeys.LIBRARIES_TO_COVER).isNullOrEmpty()
 
     internal val runtimeNativeLibraries: List<String> = mutableListOf<String>().apply {
         add(if (debug) "debug.bc" else "release.bc")

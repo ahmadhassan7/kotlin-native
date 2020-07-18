@@ -9,14 +9,17 @@ import org.jetbrains.kotlin.backend.konan.InteropBuiltIns
 import org.jetbrains.kotlin.descriptors.*
 import org.jetbrains.kotlin.ir.builders.IrBuilder
 import org.jetbrains.kotlin.ir.declarations.*
+import org.jetbrains.kotlin.ir.declarations.impl.IrConstructorImpl
 import org.jetbrains.kotlin.ir.descriptors.IrBuiltIns
 import org.jetbrains.kotlin.ir.expressions.IrExpression
 import org.jetbrains.kotlin.ir.expressions.impl.IrInstanceInitializerCallImpl
 import org.jetbrains.kotlin.ir.symbols.IrClassSymbol
 import org.jetbrains.kotlin.ir.symbols.IrSymbol
+import org.jetbrains.kotlin.ir.types.impl.*
 import org.jetbrains.kotlin.ir.util.*
 import org.jetbrains.kotlin.resolve.descriptorUtil.getSuperClassNotAny
 import org.jetbrains.kotlin.resolve.descriptorUtil.getSuperInterfaces
+import org.jetbrains.kotlin.resolve.descriptorUtil.isEffectivelyExternal
 import org.jetbrains.kotlin.resolve.descriptorUtil.parentsWithSelf
 import org.jetbrains.kotlin.types.KotlinType
 
@@ -46,12 +49,11 @@ internal interface DescriptorToIrTranslationMixin {
      * Additional elements are passed via [builder] callback.
      */
     fun createClass(descriptor: ClassDescriptor, builder: (IrClass) -> Unit): IrClass =
-            symbolTable.declareClass(
-                    startOffset = SYNTHETIC_OFFSET,
-                    endOffset = SYNTHETIC_OFFSET,
-                    origin = IrDeclarationOrigin.IR_EXTERNAL_DECLARATION_STUB,
-                    descriptor = descriptor
-            ).also { irClass ->
+            symbolTable.declareClass(descriptor) {
+                createIrClassFromDescriptor(
+                    SYNTHETIC_OFFSET, SYNTHETIC_OFFSET, IrDeclarationOrigin.IR_EXTERNAL_DECLARATION_STUB, it, descriptor
+                )
+            }.also { irClass ->
                 symbolTable.withScope(descriptor) {
                     irClass.superTypes += descriptor.typeConstructor.supertypes.map {
                         it.toIrType()
@@ -73,15 +75,21 @@ internal interface DescriptorToIrTranslationMixin {
                 is PropertyDescriptor -> createProperty(it)
                 is FunctionDescriptor -> createFunction(it, IrDeclarationOrigin.FAKE_OVERRIDE)
                 else -> error("Unexpected fake override descriptor: $it")
-            } as IrDeclaration // Assistance for type inference.
+            }
         }
     }
 
     fun createConstructor(constructorDescriptor: ClassConstructorDescriptor): IrConstructor {
-        val irConstructor = symbolTable.declareConstructor(
-                SYNTHETIC_OFFSET, SYNTHETIC_OFFSET,
-                IrDeclarationOrigin.IR_EXTERNAL_DECLARATION_STUB, constructorDescriptor
-        )
+        val irConstructor = symbolTable.declareConstructor(constructorDescriptor) {
+            with(constructorDescriptor) {
+                // TODO: [IrUninitializedType] is deprecated.
+                @Suppress("DEPRECATION")
+                IrConstructorImpl(
+                    SYNTHETIC_OFFSET, SYNTHETIC_OFFSET, IrDeclarationOrigin.IR_EXTERNAL_DECLARATION_STUB, it, name, visibility,
+                    IrUninitializedType, isInline, isEffectivelyExternal(), isPrimary, isExpect
+                )
+            }
+        }
         irConstructor.valueParameters += constructorDescriptor.valueParameters.map { valueParameterDescriptor ->
             symbolTable.declareValueParameter(
                     SYNTHETIC_OFFSET, SYNTHETIC_OFFSET, IrDeclarationOrigin.DEFINED,
@@ -160,9 +168,10 @@ internal fun ClassDescriptor.inheritsFromCStructVar(interopBuiltIns: InteropBuil
  * CEnum inheritor.
  */
 internal fun IrSymbol.findCEnumDescriptor(interopBuiltIns: InteropBuiltIns): ClassDescriptor? =
-        descriptor.parentsWithSelf
-                .filterIsInstance<ClassDescriptor>()
-                .firstOrNull { it.implementsCEnum(interopBuiltIns) }
+        descriptor.findCEnumDescriptor(interopBuiltIns)
+
+internal fun DeclarationDescriptor.findCEnumDescriptor(interopBuiltIns: InteropBuiltIns): ClassDescriptor? =
+        parentsWithSelf.filterIsInstance<ClassDescriptor>().firstOrNull { it.implementsCEnum(interopBuiltIns) }
 
 /**
  * All structs that come from interop library inherit from CStructVar class.
@@ -170,6 +179,7 @@ internal fun IrSymbol.findCEnumDescriptor(interopBuiltIns: InteropBuiltIns): Cla
  * CStructVar inheritor.
  */
 internal fun IrSymbol.findCStructDescriptor(interopBuiltIns: InteropBuiltIns): ClassDescriptor? =
-        descriptor.parentsWithSelf
-                .filterIsInstance<ClassDescriptor>()
-                .firstOrNull { it.inheritsFromCStructVar(interopBuiltIns) }
+        descriptor.findCStructDescriptor(interopBuiltIns)
+
+internal fun DeclarationDescriptor.findCStructDescriptor(interopBuiltIns: InteropBuiltIns): ClassDescriptor? =
+        parentsWithSelf.filterIsInstance<ClassDescriptor>().firstOrNull { it.inheritsFromCStructVar(interopBuiltIns) }

@@ -52,8 +52,10 @@ void* Kotlin_interop_malloc(KLong size, KInt align) {
   if (size > SIZE_MAX) {
     return nullptr;
   }
+  RuntimeAssert(align > 0, "Unsupported alignment");
+  RuntimeAssert((align & (align - 1)) == 0, "Alignment must be power of two");
 
-  void* result = konan::calloc(1, size);
+  void* result = konan::calloc_aligned(1, size, align);
   if ((reinterpret_cast<uintptr_t>(result) & (align - 1)) != 0) {
     // Unaligned!
     RuntimeAssert(false, "unsupported alignment");

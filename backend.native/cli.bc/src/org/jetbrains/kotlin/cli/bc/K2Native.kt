@@ -15,6 +15,7 @@ import org.jetbrains.kotlin.cli.common.config.addKotlinSourceRoot
 import org.jetbrains.kotlin.cli.common.config.kotlinSourceRoots
 import org.jetbrains.kotlin.cli.common.messages.CompilerMessageSeverity.*
 import org.jetbrains.kotlin.cli.common.messages.MessageCollector
+import org.jetbrains.kotlin.cli.common.messages.MessageRenderer
 import org.jetbrains.kotlin.cli.jvm.compiler.EnvironmentConfigFiles
 import org.jetbrains.kotlin.cli.jvm.compiler.KotlinCoreEnvironment
 import org.jetbrains.kotlin.cli.jvm.plugins.PluginCliParser
@@ -113,6 +114,7 @@ class K2Native : CLICompiler<K2NativeCompilerArguments>() {
 
         with(KonanConfigKeys) {
             with(configuration) {
+                arguments.kotlinHome?.let { put(KONAN_HOME, it) }
 
                 put(NODEFAULTLIBS, arguments.nodefaultlibs || !arguments.libraryToAddToCache.isNullOrEmpty())
                 put(NOENDORSEDLIBS, arguments.noendorsedlibs || !arguments.libraryToAddToCache.isNullOrEmpty())
@@ -123,8 +125,8 @@ class K2Native : CLICompiler<K2NativeCompilerArguments>() {
                         arguments.libraries.toNonNullList())
                 put(LINKER_ARGS, arguments.linkerArguments.toNonNullList() +
                         arguments.singleLinkerArguments.toNonNullList())
-                arguments.moduleName ?. let{ put(MODULE_NAME, it) }
-                arguments.target ?.let{ put(TARGET, it) }
+                arguments.moduleName?.let{ put(MODULE_NAME, it) }
+                arguments.target?.let{ put(TARGET, it) }
 
                 put(INCLUDED_BINARY_FILES,
                         arguments.includeBinaries.toNonNullList())
@@ -152,7 +154,21 @@ class K2Native : CLICompiler<K2NativeCompilerArguments>() {
                 put(LIST_TARGETS, arguments.listTargets)
                 put(OPTIMIZATION, arguments.optimization)
                 put(DEBUG, arguments.debug)
-                put(LIGHT_DEBUG, arguments.lightDebug)
+                // TODO: remove after 1.4 release.
+                if (arguments.lightDebugDeprecated) {
+                    configuration.report(WARNING,
+                            "-Xg0 is now deprecated and skipped by compiler. Light debug information is enabled by default for Darwin platforms." +
+                                    " For other targets, please, use `-Xadd-light-debug=enable` instead.")
+                }
+                putIfNotNull(LIGHT_DEBUG, when (val it = arguments.lightDebugString) {
+                    "enable" -> true
+                    "disable" -> false
+                    null -> null
+                    else -> {
+                        configuration.report(ERROR, "Unsupported -Xadd-light-debug= value: $it. Possible values are 'enable'/'disable'")
+                        null
+                    }
+                })
                 put(STATIC_FRAMEWORK, selectFrameworkType(configuration, arguments, outputKind))
                 put(OVERRIDE_CLANG_OPTIONS, arguments.clangOptions.toNonNullList())
                 put(ALLOCATION_MODE, arguments.allocator)
@@ -219,6 +235,7 @@ class K2Native : CLICompiler<K2NativeCompilerArguments>() {
                 put(LIBRARIES_TO_COVER, arguments.coveredLibraries.toNonNullList())
                 arguments.coverageFile?.let { put(PROFRAW_PATH, it) }
                 put(OBJC_GENERICS, !arguments.noObjcGenerics)
+                put(DEBUG_PREFIX_MAP, parseDebugPrefixMap(arguments, configuration))
 
                 put(LIBRARIES_TO_CACHE, parseLibrariesToCache(arguments, configuration, outputKind))
                 val libraryToAddToCache = parseLibraryToAddToCache(arguments, configuration, outputKind)
@@ -228,6 +245,11 @@ class K2Native : CLICompiler<K2NativeCompilerArguments>() {
                 libraryToAddToCache?.let { put(LIBRARY_TO_ADD_TO_CACHE, it) }
                 put(CACHE_DIRECTORIES, cacheDirectories)
                 put(CACHED_LIBRARIES, parseCachedLibraries(arguments, configuration))
+
+                parseShortModuleName(arguments, configuration, outputKind)?.let {
+                    put(SHORT_MODULE_NAME, it)
+                }
+                put(DISABLE_FAKE_OVERRIDE_VALIDATOR, arguments.disableFakeOverrideValidator)
             }
         }
     }
@@ -244,8 +266,17 @@ class K2Native : CLICompiler<K2NativeCompilerArguments>() {
         }
         @JvmStatic fun mainNoExit(args: Array<String>) {
             profile("Total compiler main()") {
-                if (CLITool.doMainNoExit(K2Native(), args) != ExitCode.OK)
+                if (doMainNoExit(K2Native(), args) != ExitCode.OK) {
                     throw KonanCompilationException("Compilation finished with errors")
+                }
+            }
+        }
+
+        @JvmStatic fun mainNoExitWithGradleRenderer(args: Array<String>) {
+            profile("Total compiler main()") {
+                if (doMainNoExit(K2Native(), args, MessageRenderer.GRADLE_STYLE) != ExitCode.OK) {
+                    throw KonanCompilationException("Compilation finished with errors")
+                }
             }
         }
     }
@@ -373,5 +404,42 @@ private fun parseLibraryToAddToCache(
     }
 }
 
+// TODO: Support short names for current module in ObjC export and lift this limitation.
+private fun parseShortModuleName(
+        arguments: K2NativeCompilerArguments,
+        configuration: CompilerConfiguration,
+        outputKind: CompilerOutputKind
+): String? {
+    val input = arguments.shortModuleName
+
+    return if (input != null && outputKind != CompilerOutputKind.LIBRARY) {
+        configuration.report(
+                STRONG_WARNING,
+                "$SHORT_MODULE_NAME_ARG is only supported when producing a Kotlin library, " +
+                    "but the compiler is producing ${outputKind.name.toLowerCase()}"
+        )
+        null
+    } else {
+        input
+    }
+}
+
+private fun parseDebugPrefixMap(
+        arguments: K2NativeCompilerArguments,
+        configuration: CompilerConfiguration
+): Map<String, String> = arguments.debugPrefixMap?.asList().orEmpty().mapNotNull {
+    val libraryAndCache = it.split("=")
+    if (libraryAndCache.size != 2) {
+        configuration.report(
+                ERROR,
+                "incorrect debug prefix map format: expected '<old>=<new>', got '$it'"
+        )
+        null
+    } else {
+        libraryAndCache[0] to libraryAndCache[1]
+    }
+}.toMap()
+
+
 fun main(args: Array<String>) = K2Native.main(args)
-fun mainNoExit(args: Array<String>) = K2Native.mainNoExit(args)
+fun mainNoExitWithGradleRenderer(args: Array<String>) = K2Native.mainNoExitWithGradleRenderer(args)

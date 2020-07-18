@@ -588,6 +588,7 @@ internal class FunctionGenerationContext(val function: LLVMValueRef,
 
     fun fsub(arg0: LLVMValueRef, arg1: LLVMValueRef, name: String = ""): LLVMValueRef = LLVMBuildFSub(builder, arg0, arg1, name)!!
     fun fadd(arg0: LLVMValueRef, arg1: LLVMValueRef, name: String = ""): LLVMValueRef = LLVMBuildFAdd(builder, arg0, arg1, name)!!
+    fun fneg(arg: LLVMValueRef, name: String = ""): LLVMValueRef = LLVMBuildFNeg(builder, arg, name)!!
 
     fun select(ifValue: LLVMValueRef, thenValue: LLVMValueRef, elseValue: LLVMValueRef, name: String = ""): LLVMValueRef =
             LLVMBuildSelect(builder, ifValue, thenValue, elseValue, name)!!
@@ -872,7 +873,7 @@ internal class FunctionGenerationContext(val function: LLVMValueRef,
 
     private fun IrSimpleFunction.findOverriddenMethodOfAny(): IrSimpleFunction? {
         if (modality == Modality.ABSTRACT) return null
-        val resolved = resolveFakeOverride()
+        val resolved = resolveFakeOverride()!!
         if ((resolved.parent as IrClass).isAny()) {
             return resolved
         }
@@ -901,32 +902,56 @@ internal class FunctionGenerationContext(val function: LLVMValueRef,
             }
         }
 
-        // If object is imported - access it via getter function.
-        if (isExternal(irClass)) {
-            val valueGetterName = irClass.objectInstanceGetterSymbolName
-            val valueGetterFunction = LLVMGetNamedFunction(context.llvmModule, valueGetterName) ?:
-                LLVMAddFunction(context.llvmModule, valueGetterName,
-                        functionType(kObjHeaderPtr, false, kObjHeaderPtrPtr))
-            return call(valueGetterFunction!!,
-                        listOf(),
-                        resultLifetime = Lifetime.GLOBAL,
-                        exceptionHandler = exceptionHandler)
+        val storageKind = irClass.storageKind(context)
+
+        val objectPtr = if (isExternal(irClass)) {
+            when (storageKind) {
+                // If thread local object is imported - access it via getter function.
+                ObjectStorageKind.THREAD_LOCAL -> {
+                    val valueGetterName = irClass.threadLocalObjectStorageGetterSymbolName
+                    val valueGetterFunction = LLVMGetNamedFunction(context.llvmModule, valueGetterName)
+                            ?: LLVMAddFunction(context.llvmModule, valueGetterName,
+                                    functionType(kObjHeaderPtrPtr, false))
+                    call(valueGetterFunction!!,
+                            listOf(),
+                            resultLifetime = Lifetime.GLOBAL,
+                            exceptionHandler = exceptionHandler)
+                }
+
+                // If global object is imported - import it's storage directly.
+                ObjectStorageKind.PERMANENT, ObjectStorageKind.SHARED -> {
+                    val llvmType = getLLVMType(irClass.defaultType)
+                    importGlobal(
+                            irClass.globalObjectStorageSymbolName,
+                            llvmType,
+                            origin = irClass.llvmSymbolOrigin
+                    )
+                }
+            }
+        } else {
+            // Local globals and thread locals storage info is stored in our map.
+            val singleton = context.llvmDeclarations.forSingleton(irClass)
+            val instanceAddress = singleton.instanceStorage
+            instanceAddress.getAddress(this)
         }
 
-        val storageKind = irClass.storageKind(context)
         when (storageKind) {
-            ObjectStorageKind.SHARED -> context.llvm.sharedObjects += irClass
-            ObjectStorageKind.THREAD_LOCAL -> context.llvm.objects += irClass
+            ObjectStorageKind.SHARED ->
+                // If current file used a shared object, make file's (de)initializer function deinit it.
+                context.llvm.globalSharedObjects += objectPtr
+            ObjectStorageKind.THREAD_LOCAL ->
+                // If current file used locally defined TLS objects, make file's (de)initializer function
+                // init and deinit TLS.
+                // Note: for exported TLS objects a getter is generated in a file they're defined in. Which
+                // adds TLS init and deinit to that file's (de)initializer function.
+                if (!isExternal(irClass))
+                    context.llvm.fileUsesThreadLocalObjects = true
             ObjectStorageKind.PERMANENT -> { /* Do nothing, no need to free such an instance. */ }
         }
-        val singleton = context.llvmDeclarations.forSingleton(irClass)
-        val instanceAddress = singleton.instanceStorage
-        val instanceShadowAddress = singleton.instanceShadowStorage
 
         if (storageKind == ObjectStorageKind.PERMANENT) {
-            return loadSlot(instanceAddress.getAddress(this), false)
+            return loadSlot(objectPtr, false)
         }
-        val objectPtr = instanceAddress.getAddress(this)
         val bbInit = basicBlock("label_init", startLocationInfo, endLocationInfo)
         val bbExit = basicBlock("label_continue", startLocationInfo, endLocationInfo)
         val objectVal = loadSlot(objectPtr, false)
@@ -938,13 +963,13 @@ internal class FunctionGenerationContext(val function: LLVMValueRef,
         val typeInfo = codegen.typeInfoForAllocation(irClass)
         val defaultConstructor = irClass.constructors.single { it.valueParameters.size == 0 }
         val ctor = codegen.llvmFunction(defaultConstructor)
-        val (initFunction, args) =
+        val initFunction =
                 if (storageKind == ObjectStorageKind.SHARED && context.config.threadsAreAllowed) {
-                    val shadowObjectPtr = instanceShadowAddress!!.getAddress(this)
-                    context.llvm.initSharedInstanceFunction to listOf(objectPtr, shadowObjectPtr, typeInfo, ctor)
+                    context.llvm.initSharedInstanceFunction
                 } else {
-                    context.llvm.initInstanceFunction to listOf(objectPtr, typeInfo, ctor)
+                    context.llvm.initInstanceFunction
                 }
+        val args = listOf(objectPtr, typeInfo, ctor)
         val newValue = call(initFunction, args, Lifetime.GLOBAL, exceptionHandler)
         val bbInitResult = currentBlock
         br(bbExit)
@@ -1006,7 +1031,7 @@ internal class FunctionGenerationContext(val function: LLVMValueRef,
             }
 
             val classInfo = codegen.kotlinObjCClassInfo(irClass)
-            val classPointerGlobal = load(structGep(classInfo, 12 /* createdClass */))
+            val classPointerGlobal = load(structGep(classInfo, KotlinObjCClassInfoGenerator.createdClassFieldIndex))
 
             val storedClass = this.load(classPointerGlobal)
 

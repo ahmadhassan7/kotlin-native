@@ -635,7 +635,7 @@ internal class CAdapterGenerator(val context: Context) : DeclarationDescriptorVi
 
     private val seenPackageFragments = mutableSetOf<PackageFragmentDescriptor>()
     private var currentPackageFragments: List<PackageFragmentDescriptor> = emptyList()
-    private val packageScopes = mutableMapOf<String, ExportedElementScope>()
+    private val packageScopes = mutableMapOf<FqName, ExportedElementScope>()
 
     override fun visitModuleDeclaration(descriptor: ModuleDescriptor, ignored: Void?): Boolean {
         TODO("Shall not be called directly")
@@ -648,8 +648,8 @@ internal class CAdapterGenerator(val context: Context) : DeclarationDescriptorVi
 
     override fun visitPackageFragmentDescriptor(descriptor: PackageFragmentDescriptor, ignored: Void?): Boolean {
         val fqName = descriptor.fqName
-        val name = if (fqName.isRoot) "root" else translateName(fqName.shortName().asString())
-        val packageScope = packageScopes.getOrPut(name) {
+        val packageScope = packageScopes.getOrPut(fqName) {
+            val name = if (fqName.isRoot) "root" else translateName(fqName.shortName().asString())
             val scope = ExportedElementScope(ScopeKind.PACKAGE, name)
             scopes.last().scopes += scope
             scope
@@ -848,7 +848,20 @@ internal class CAdapterGenerator(val context: Context) : DeclarationDescriptorVi
         output("typedef unsigned long long ${prefix}_KULong;")
         output("typedef float              ${prefix}_KFloat;")
         output("typedef double             ${prefix}_KDouble;")
-        output("typedef float __attribute__ ((__vector_size__ (16))) ${prefix}_KVector128;")
+
+        val typedef_KVector128 = "typedef float __attribute__ ((__vector_size__ (16))) ${prefix}_KVector128;"
+        if (context.config.target.family == Family.MINGW) {
+            // Separate `output` for each line to ensure Windows EOL (LFCR), otherwise generated file will have inconsistent line ending.
+            output("#ifndef _MSC_VER")
+            output(typedef_KVector128)
+            output("#else")
+            output("#include <xmmintrin.h>")
+            output("typedef __m128 ${prefix}_KVector128;")
+            output("#endif")
+        } else {
+            output(typedef_KVector128)
+        }
+
         output("typedef void*              ${prefix}_KNativePtr;")
         output("struct ${prefix}_KType;")
         output("typedef struct ${prefix}_KType ${prefix}_KType;")

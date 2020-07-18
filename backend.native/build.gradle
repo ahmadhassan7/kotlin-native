@@ -56,6 +56,8 @@ compileCompilerKotlin {
     // but not for Kotlin.
     dependsOn('generateCompilerProto')
     kotlinOptions.jvmTarget = "1.8"
+    kotlinOptions.allWarningsAsErrors=true
+    kotlinOptions.freeCompilerArgs += ['-Xopt-in=kotlin.RequiresOptIn', '-Xopt-in=org.jetbrains.kotlin.ir.ObsoleteDescriptorBasedAPI']
 }
 
 compileCompilerJava {
@@ -129,7 +131,6 @@ configurations {
     kotlin_stdlib_jar
     kotlin_reflect_jar
     kotlin_script_runtime_jar
-    kotlin_native_utils_jar
     trove4j_jar
     kotlinCommonSources
 
@@ -149,11 +150,12 @@ dependencies {
     kotlin_stdlib_jar "$kotlinStdLibModule@jar"
     kotlin_reflect_jar "$kotlinReflectModule@jar"
     kotlin_script_runtime_jar "$kotlinScriptRuntimeModule@jar"
-    kotlin_native_utils_jar "$kotlinNativeUtilsModule@jar"
 
     [kotlinCommonStdlibModule, kotlinTestCommonModule, kotlinTestAnnotationsCommonModule].each {
         kotlinCommonSources(it) { transitive = false }
     }
+
+    compilerCompile project(":utilities:basic-utils")
 
     compilerCompile "com.google.protobuf:protobuf-java:${protobufVersion}"
 
@@ -162,12 +164,10 @@ dependencies {
     compilerCompile kotlinNativeInterop['hash'].configuration
     compilerCompile kotlinNativeInterop['files'].configuration
     compilerCompile "org.jetbrains.kotlin:kotlin-native-shared:$konanVersion"
-    compilerCompile "org.jetbrains.kotlin:konan.serializer:$konanVersion"
 
     cli_bcCompile kotlinCompilerModule
     cli_bcCompile "org.jetbrains.kotlin:kotlin-native-shared:$konanVersion"
     cli_bcCompile sourceSets.compiler.output
-    cli_bcCompile "org.jetbrains.kotlin:konan.serializer:$konanVersion"
 
     bc_frontendCompile kotlinCompilerModule
 
@@ -196,16 +196,14 @@ final List<File> stdLibSrc = [
 ]
 
 // These files are built before the 'dist' is complete,
-// so we provide custom values for
-// konan.home, --runtime, -Djava.library.path etc
+// so we provide a custom value for --runtime
 
 targetList.each { target ->
-    def konanJvmArgs =  [*HostManager.regularJvmArgs,
-            "-Dkonan.home=${rootProject.projectDir}/dist",
-            "-Djava.library.path=${project.buildDir}/nativelibs/$hostName",
-    ]
+    def konanJvmArgs =  [*HostManager.regularJvmArgs]
 
-    def defaultArgs = ['-nopack', '-nostdlib', '-no-default-libs', '-no-endorsed-libs']
+    def defaultArgs = ['-nopack', '-nostdlib', '-no-default-libs', '-no-endorsed-libs',
+                       //Uncomment this '-Werror' when common stdlib will be ready
+    ]
     if (target != "wasm32") defaultArgs += '-g'
     def konanArgs = [*defaultArgs,
                      '-target', target,
@@ -214,14 +212,17 @@ targetList.each { target ->
 
     task("${target}Stdlib", type: JavaExec) {
         main = 'org.jetbrains.kotlin.cli.bc.K2NativeKt'
-        classpath = project.configurations.cli_bc
+        // This task depends on distCompiler, so the compiler jar is already in the dist directory.
+        classpath = fileTree("${rootProject.projectDir}/dist/konan/lib") {
+            include "*.jar"
+        }
         jvmArgs = konanJvmArgs
         args = [*konanArgs,
                 '-output', project(':runtime').file("build/${target}Stdlib"),
                 '-produce', 'library', '-module-name', 'stdlib', '-XXLanguage:+AllowContractsForCustomFunctions',
-                '-Xmulti-platform', '-Xuse-experimental=kotlin.Experimental', '-XXLanguage:+InlineClasses',
-                '-Xuse-experimental=kotlin.contracts.ExperimentalContracts',
-                '-Xuse-experimental=kotlin.ExperimentalMultiplatform',
+                '-Xmulti-platform', '-Xopt-in=kotlin.RequiresOptIn', '-Xinline-classes',
+                '-Xopt-in=kotlin.contracts.ExperimentalContracts',
+                '-Xopt-in=kotlin.ExperimentalMultiplatform',
                 '-Xallow-result-return-type',
                 commonSrc.absolutePath,
                 "-Xcommon-sources=${commonSrc.absolutePath}",
@@ -252,7 +253,7 @@ jar {
     dependsOn ':runtime:hostRuntime', 'external_jars'
 }
 
-def externalJars = ['compiler', 'stdlib', 'reflect', 'script_runtime', 'native_utils']
+def externalJars = ['compiler', 'stdlib', 'reflect', 'script_runtime']
 
 task trove4jCopy(type: Copy) {
     from configurations.getByName("trove4j_jar") {
@@ -299,8 +300,7 @@ task debugCompiler(type: JavaExec) {
     classpath = project.fileTree("${distDir.canonicalPath}/konan/lib/") {
         include '*.jar'
     }
-    jvmArgs "-Dorg.jetbrains.kotlin.native.home=${distDir.canonicalPath}",
-            "-Djava.library.path=${distDir.canonicalPath}/konan/nativelib"
+    jvmArgs "-Dorg.jetbrains.kotlin.native.home=${distDir.canonicalPath}"
     enableAssertions = true
     args = findProperty("konan.debug.args").toString().tokenize() ?: []
 }

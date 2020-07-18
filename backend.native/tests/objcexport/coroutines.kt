@@ -1,6 +1,12 @@
+/*
+ * Copyright 2010-2020 JetBrains s.r.o. Use of this source code is governed by the Apache 2.0 license
+ * that can be found in the LICENSE file.
+ */
+
 package coroutines
 
 import kotlin.coroutines.*
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.coroutines.intrinsics.*
 import kotlin.native.concurrent.isFrozen
 import kotlin.native.internal.ObjCErrorException
@@ -10,7 +16,7 @@ class CoroutineException : Throwable()
 
 suspend fun suspendFun() = 42
 
-@Throws(CoroutineException::class)
+@Throws(CoroutineException::class, CancellationException::class)
 suspend fun suspendFun(result: Any?, doSuspend: Boolean, doThrow: Boolean): Any? {
     if (doSuspend) {
         suspendCoroutineUninterceptedOrReturn<Unit> {
@@ -36,20 +42,20 @@ class ContinuationHolder<T> {
     }
 }
 
-@Throws(CoroutineException::class)
+@Throws(CoroutineException::class, CancellationException::class)
 suspend fun suspendFunAsync(result: Any?, continuationHolder: ContinuationHolder<Any?>): Any? =
         suspendCoroutineUninterceptedOrReturn<Any?> {
             continuationHolder.continuation = it
             COROUTINE_SUSPENDED
         } ?: result
 
-@Throws(CoroutineException::class)
+@Throws(CoroutineException::class, CancellationException::class)
 fun throwException(exception: Throwable) {
     throw exception
 }
 
 interface SuspendFun {
-    @Throws(CoroutineException::class)
+    @Throws(CoroutineException::class, CancellationException::class)
     suspend fun suspendFun(doYield: Boolean, doThrow: Boolean): Int
 }
 
@@ -79,7 +85,7 @@ fun callSuspendFun(suspendFun: SuspendFun, doYield: Boolean, doThrow: Boolean, r
             .startCoroutine(ResultHolderCompletion(resultHolder))
 }
 
-@Throws
+@Throws(CoroutineException::class, CancellationException::class)
 suspend fun callSuspendFun2(suspendFun: SuspendFun, doYield: Boolean, doThrow: Boolean): Int {
     return suspendFun.suspendFun(doYield = doYield, doThrow = doThrow)
 }
@@ -91,10 +97,10 @@ interface SuspendBridge<T> {
     suspend fun unit(value: T): Unit
     suspend fun unitAsAny(value: T): Any?
 
-    @Throws(CoroutineException::class) suspend fun nothing(value: T): Nothing
-    @Throws(CoroutineException::class) suspend fun nothingAsInt(value: T): Int
-    @Throws(CoroutineException::class) suspend fun nothingAsAny(value: T): Any?
-    @Throws(CoroutineException::class) suspend fun nothingAsUnit(value: T): Unit
+    @Throws(Throwable::class) suspend fun nothing(value: T): Nothing
+    @Throws(Throwable::class) suspend fun nothingAsInt(value: T): Int
+    @Throws(Throwable::class) suspend fun nothingAsAny(value: T): Any?
+    @Throws(Throwable::class) suspend fun nothingAsUnit(value: T): Unit
 }
 
 abstract class AbstractSuspendBridge : SuspendBridge<Int> {
@@ -127,10 +133,34 @@ private suspend fun callAbstractSuspendBridgeImpl(bridge: AbstractSuspendBridge)
     assertFailsWith<ObjCErrorException> { bridge.nothingAsUnit(10) }
 }
 
-@Throws
+@Throws(Throwable::class)
 fun callSuspendBridge(bridge: AbstractSuspendBridge, resultHolder: ResultHolder<Unit>) {
     suspend {
         callSuspendBridgeImpl(bridge)
         callAbstractSuspendBridgeImpl(bridge)
     }.startCoroutine(ResultHolderCompletion(resultHolder))
+}
+
+suspend fun throwCancellationException(): Unit {
+    val exception = CancellationException("coroutine is cancelled")
+
+    // Note: frontend checker hardcodes fq names of CancellationException super classes (see NativeThrowsChecker).
+    // This is our best effort to keep that list in sync with actual stdlib code:
+    assertTrue(exception is kotlin.Throwable)
+    assertTrue(exception is kotlin.Exception)
+    assertTrue(exception is kotlin.RuntimeException)
+    assertTrue(exception is kotlin.IllegalStateException)
+    assertTrue(exception is kotlin.coroutines.cancellation.CancellationException)
+
+    throw exception
+}
+
+abstract class ThrowCancellationException {
+    internal abstract suspend fun throwCancellationException()
+}
+
+class ThrowCancellationExceptionImpl : ThrowCancellationException() {
+    public override suspend fun throwCancellationException() {
+        throw CancellationException()
+    }
 }

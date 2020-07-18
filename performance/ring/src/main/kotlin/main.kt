@@ -26,6 +26,7 @@ class RingLauncher : Launcher() {
             mutableMapOf(
                     "AbstractMethod.sortStrings" to BenchmarkEntryWithInit.create(::AbstractMethodBenchmark, { sortStrings() }),
                     "AbstractMethod.sortStringsWithComparator" to BenchmarkEntryWithInit.create(::AbstractMethodBenchmark, { sortStringsWithComparator() }),
+                    "AllocationBenchmark.allocateObjects" to BenchmarkEntryWithInit.create(::AllocationBenchmark, { allocateObjects() }),
                     "ClassArray.copy" to BenchmarkEntryWithInit.create(::ClassArrayBenchmark, { copy() }),
                     "ClassArray.copyManual" to BenchmarkEntryWithInit.create(::ClassArrayBenchmark, { copyManual() }),
                     "ClassArray.filterAndCount" to BenchmarkEntryWithInit.create(::ClassArrayBenchmark, { filterAndCount() }),
@@ -77,6 +78,7 @@ class RingLauncher : Launcher() {
                     "DefaultArgument.testOneOfEight" to BenchmarkEntryWithInit.create(::DefaultArgumentBenchmark, { testOneOfEight() }),
                     "DefaultArgument.testEightOfEight" to BenchmarkEntryWithInit.create(::DefaultArgumentBenchmark, { testEightOfEight() }),
                     "Elvis.testElvis" to BenchmarkEntryWithInit.create(::ElvisBenchmark, { testElvis() }),
+                    "Elvis.testCompositeElvis" to BenchmarkEntryWithInit.create(::ElvisBenchmark, { testCompositeElvis() }),
                     "Euler.problem1bySequence" to BenchmarkEntryWithInit.create(::EulerBenchmark, { problem1bySequence() }),
                     "Euler.problem1" to BenchmarkEntryWithInit.create(::EulerBenchmark, { problem1() }),
                     "Euler.problem2" to BenchmarkEntryWithInit.create(::EulerBenchmark, { problem2() }),
@@ -174,6 +176,7 @@ class RingLauncher : Launcher() {
                     "ParameterNotNull.invokeEightArgsWithoutNullCheck" to BenchmarkEntryWithInit.create(::ParameterNotNullAssertionBenchmark, { invokeEightArgsWithoutNullCheck() }),
                     "PrimeList.calcDirect" to BenchmarkEntryWithInit.create(::PrimeListBenchmark, { calcDirect() }),
                     "PrimeList.calcEratosthenes" to BenchmarkEntryWithInit.create(::PrimeListBenchmark, { calcEratosthenes() }),
+                    "Singleton.access" to BenchmarkEntryWithInit.create(::SingletonBenchmark, { access() }),
                     "String.stringConcat" to BenchmarkEntryWithInit.create(::StringBenchmark, { stringConcat() }),
                     "String.stringConcatNullable" to BenchmarkEntryWithInit.create(::StringBenchmark, { stringConcatNullable() }),
                     "String.stringBuilderConcat" to BenchmarkEntryWithInit.create(::StringBenchmark, { stringBuilderConcat() }),

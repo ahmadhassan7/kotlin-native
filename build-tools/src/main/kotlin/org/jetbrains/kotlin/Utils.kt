@@ -7,9 +7,11 @@ package org.jetbrains.kotlin
 
 import org.gradle.api.Project
 import org.gradle.api.Task
+import org.jetbrains.kotlin.konan.properties.loadProperties
+import org.jetbrains.kotlin.konan.properties.propertyList
+import org.jetbrains.kotlin.konan.properties.saveProperties
 import org.jetbrains.kotlin.konan.target.*
-import java.io.FileInputStream
-import java.io.IOException
+import org.jetbrains.kotlin.library.KLIB_PROPERTY_NATIVE_TARGETS
 import java.io.File
 import java.util.concurrent.TimeUnit
 import java.net.HttpURLConnection
@@ -17,6 +19,7 @@ import java.net.URL
 import java.util.Base64
 import org.jetbrains.report.json.*
 import java.nio.file.Path
+import org.jetbrains.kotlin.konan.file.File as KFile
 
 //region Project properties.
 
@@ -40,6 +43,9 @@ val Project.testOutputStdlib
 
 val Project.testOutputFramework
     get() = (findProperty("testOutputFramework") as File).toString()
+
+val Project.testOutputExternal
+    get() = (findProperty("testOutputExternal") as File).toString()
 
 val Project.kotlinNativeDist
     get() = this.rootProject.file(this.findProperty("org.jetbrains.kotlin.native.home")
@@ -91,6 +97,9 @@ fun Project.getFilesToCompile(compile: List<String>, exclude: List<String>): Lis
 
 //region Task dependency.
 
+fun Project.findKonanBuildTask(artifact: String, target: KonanTarget): Task =
+    tasks.getByName("compileKonan${artifact.capitalize()}${target.name.capitalize()}")
+
 fun Project.dependsOnDist(taskName: String) {
     project.tasks.getByName(taskName).dependsOnDist()
 }
@@ -103,7 +112,7 @@ fun Task.dependsOnDist() {
         val target = project.testTarget
         if (target != HostManager.host) {
             // if a test_target property is set then tests should depend on a crossDist
-            // otherwise runtime components would not be build for a target.
+            // otherwise, runtime components would not be build for a target.
             dependsOn(rootTasks.getByName("${target.name}CrossDist"))
         }
     }
@@ -126,14 +135,14 @@ fun Task.sameDependenciesAs(task: Task) {
 }
 
 /**
- * Set dependency on [lib] built by the Konan Plugin for the [task],
- * also make [lib] depend on `dist` and all dependencies of the [task] to make [lib] execute before the [task].
+ * Set dependency on [artifact] built by the Konan Plugin for the receiver task,
+ * also make [artifact] depend on `dist` and all dependencies of the task to make [artifact] execute before the task.
  */
-fun Project.dependOnKonanBuildingTask(lib: String, target: KonanTarget, task: Task) {
-    val libTask = "compileKonan${lib.capitalize()}${target.name.capitalize()}"
-    this.dependsOnDist(libTask)
-    libTask.sameDependenciesAs(task)
-    task.dependsOn(libTask)
+fun Task.dependsOnKonanBuildingTask(artifact: String, target: KonanTarget) {
+    val buildTask = project.findKonanBuildTask(artifact, target)
+    buildTask.dependsOnDist()
+    buildTask.sameDependenciesAs(this)
+    dependsOn(buildTask)
 }
 
 //endregion
@@ -202,7 +211,7 @@ fun getBuild(buildLocator: String, user: String, password: String) =
 fun sendGetRequest(url: String, username: String? = null, password: String? = null) : String {
     val connection = URL(url).openConnection() as HttpURLConnection
     if (username != null && password != null) {
-        val auth = Base64.getEncoder().encode((username + ":" + password).toByteArray()).toString(Charsets.UTF_8)
+        val auth = Base64.getEncoder().encode(("$username:$password").toByteArray()).toString(Charsets.UTF_8)
         connection.addRequestProperty("Authorization", "Basic $auth")
     }
     connection.setRequestProperty("Accept", "application/json");
@@ -249,9 +258,91 @@ fun compileSwift(project: Project, target: KonanTarget, sources: List<String>, o
         |stdout: $stdOut
         |stderr: $stdErr
         """.trimMargin())
-    check(exitCode == 0, { "Compilation failed" })
-    check(output.toFile().exists(), { "Compiler swiftc hasn't produced an output file: $output" })
+    check(exitCode == 0) { "Compilation failed" }
+    check(output.toFile().exists()) { "Compiler swiftc hasn't produced an output file: $output" }
 }
 
 fun targetSupportsMimallocAllocator(targetName: String) =
         HostManager().targetByName(targetName).supportsMimallocAllocator()
+
+fun Project.mergeManifestsByTargets(source: File, destination: File) {
+    logger.info("Merging manifests: $source -> $destination")
+
+    val sourceFile = KFile(source.absolutePath)
+    val sourceProperties = sourceFile.loadProperties()
+
+    val destinationFile = KFile(destination.absolutePath)
+    val destinationProperties = destinationFile.loadProperties()
+
+    // check that all properties except for KLIB_PROPERTY_NATIVE_TARGETS are equivalent
+    val mismatchedProperties = (sourceProperties.keys + destinationProperties.keys)
+            .asSequence()
+            .map { it.toString() }
+            .filter { it != KLIB_PROPERTY_NATIVE_TARGETS }
+            .sorted()
+            .mapNotNull { propertyKey: String ->
+                val sourceProperty: String? = sourceProperties.getProperty(propertyKey)
+                val destinationProperty: String? = destinationProperties.getProperty(propertyKey)
+                when {
+                    sourceProperty == null -> "\"$propertyKey\" is absent in $sourceFile"
+                    destinationProperty == null -> "\"$propertyKey\" is absent in $destinationFile"
+                    sourceProperty == destinationProperty -> {
+                        // properties match, OK
+                        null
+                    }
+                    sourceProperties.propertyList(propertyKey, escapeInQuotes = true).toSet() ==
+                            destinationProperties.propertyList(propertyKey, escapeInQuotes = true).toSet() -> {
+                        // properties match, OK
+                        null
+                    }
+                    else -> "\"$propertyKey\" differ: [$sourceProperty] vs [$destinationProperty]"
+                }
+            }
+            .toList()
+
+    check(mismatchedProperties.isEmpty()) {
+        buildString {
+            appendln("Found mismatched properties while merging manifest files: $source -> $destination")
+            mismatchedProperties.joinTo(this, "\n")
+        }
+    }
+
+    // merge KLIB_PROPERTY_NATIVE_TARGETS property
+    val sourceNativeTargets = sourceProperties.propertyList(KLIB_PROPERTY_NATIVE_TARGETS)
+    val destinationNativeTargets = destinationProperties.propertyList(KLIB_PROPERTY_NATIVE_TARGETS)
+
+    val mergedNativeTargets = HashSet<String>().apply {
+        addAll(sourceNativeTargets)
+        addAll(destinationNativeTargets)
+    }
+
+    destinationProperties[KLIB_PROPERTY_NATIVE_TARGETS] = mergedNativeTargets.joinToString(" ")
+
+    destinationFile.saveProperties(destinationProperties)
+}
+
+fun Project.buildStaticLibrary(cSources: Collection<File>, output: File, objDir: File) {
+    delete(objDir)
+    delete(output)
+
+    val platform = platformManager.platform(testTarget)
+
+    objDir.mkdirs()
+    exec {
+        it.commandLine(platform.clang.clangC(
+                "-c",
+                *cSources.map { it.absolutePath }.toTypedArray()
+        ))
+        it.workingDir(objDir)
+    }
+
+    output.parentFile.mkdirs()
+    exec {
+        it.commandLine(
+                "${platform.configurables.absoluteLlvmHome}/bin/llvm-ar",
+                "-rc",
+                output,
+                *fileTree(objDir).files.toTypedArray()
+        )
+    }
+}

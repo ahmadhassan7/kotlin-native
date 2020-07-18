@@ -66,6 +66,7 @@ repositories {
 }
 
 dependencies {
+    compile project(":utilities:basic-utils")
     compile "org.jetbrains.kotlin:kotlin-stdlib:$kotlinVersion"
     compile "org.jetbrains.kotlin:kotlin-reflect:$kotlinVersion"
 }
@@ -74,7 +75,9 @@ sourceSets.main.kotlin.srcDirs += "src/jvm/kotlin"
 
 compileKotlin {
     kotlinOptions {
-        freeCompilerArgs = ['-Xuse-experimental=kotlin.ExperimentalUnsignedTypes', "-XXLanguage:+InlineClasses"]
+        freeCompilerArgs = ['-Xuse-experimental=kotlin.ExperimentalUnsignedTypes', '-Xuse-experimental=kotlin.Experimental',
+                            '-Xopt-in=kotlin.RequiresOptIn', "-XXLanguage:+InlineClasses"]
+        allWarningsAsErrors=true
     }
 }
 

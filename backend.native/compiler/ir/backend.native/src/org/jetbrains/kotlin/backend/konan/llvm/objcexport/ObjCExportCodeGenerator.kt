@@ -9,10 +9,7 @@ import llvm.*
 import org.jetbrains.kotlin.backend.common.ir.simpleFunctions
 import org.jetbrains.kotlin.backend.konan.*
 import org.jetbrains.kotlin.backend.konan.descriptors.*
-import org.jetbrains.kotlin.backend.konan.ir.allParameters
-import org.jetbrains.kotlin.backend.konan.ir.isOverridable
-import org.jetbrains.kotlin.backend.konan.ir.isUnit
-import org.jetbrains.kotlin.backend.konan.ir.llvmSymbolOrigin
+import org.jetbrains.kotlin.backend.konan.ir.*
 import org.jetbrains.kotlin.backend.konan.llvm.*
 import org.jetbrains.kotlin.backend.konan.llvm.objc.ObjCCodeGenerator
 import org.jetbrains.kotlin.backend.konan.llvm.objc.ObjCDataGenerator
@@ -377,7 +374,7 @@ internal class ObjCExportCodeGenerator(
         )
     }
 
-    private val impType = pointerType(functionType(int8TypePtr, true, int8TypePtr, int8TypePtr))
+    private val impType = pointerType(functionType(voidType, false))
 
     internal val directMethodAdapters = mutableMapOf<DirectAdapterRequest, ObjCToKotlinMethodAdapter>()
 
@@ -486,6 +483,7 @@ private fun ObjCExportCodeGenerator.replaceExternalWeakOrCommonGlobal(
             // Note: actually this is required only if global's weak/common definition is in another object file,
             // but it is simpler to do this for all globals, considering that all usages can't be removed by DCE anyway.
             context.llvm.usedGlobals += global.llvmGlobal
+            LLVMSetVisibility(global.llvmGlobal, LLVMVisibility.LLVMHiddenVisibility)
         }
     }
 }
@@ -602,16 +600,13 @@ private fun ObjCExportCodeGenerator.generateContinuationToCompletionConverter(
     }
 }
 
-private const val maxConvertorsInCache = 33
+private val ObjCExportBlockCodeGenerator.mappedFunctionNClasses get() =
+    context.ir.symbols.functionIrClassFactory.builtFunctionNClasses
+        .filter { it.irClass.descriptor.isMappedFunctionClass() }
 
 private fun ObjCExportBlockCodeGenerator.emitFunctionConverters() {
     require(context.producedLlvmModuleContainsStdlib)
-    var count = context.ir.symbols.functionIrClassFactory.builtFunctionNClasses.size
-    // TODO: ugly hack to avoid huge unneeded adaptors linked into every binary, needs rework.
-    if (context.config.produce.isCache) {
-        count = count.coerceAtMost(maxConvertorsInCache)
-    }
-    context.ir.symbols.functionIrClassFactory.builtFunctionNClasses.take(count).forEach { functionClass ->
+    mappedFunctionNClasses.forEach { functionClass ->
         val converter = kotlinFunctionToBlockConverter(BlockPointerBridge(functionClass.arity, returnsVoid = false))
 
         val writableTypeInfoValue = buildWritableTypeInfoValue(converter = constPointer(converter))
@@ -621,22 +616,15 @@ private fun ObjCExportBlockCodeGenerator.emitFunctionConverters() {
 
 private fun ObjCExportBlockCodeGenerator.emitBlockToKotlinFunctionConverters() {
     require(context.producedLlvmModuleContainsStdlib)
-    val functionClassesByArity =
-            context.ir.symbols.functionIrClassFactory.builtFunctionNClasses.associateBy { it.arity }
+    val functionClassesByArity = mappedFunctionNClasses.associateBy { it.arity }
 
-    var count = ((functionClassesByArity.keys.max() ?: -1) + 1)
-    // TODO: ugly hack to avoid huge unneeded adaptors linked into every binary, needs rework.
-    if (context.config.produce.isCache) {
-        count = count.coerceAtMost(maxConvertorsInCache)
-    }
-    val converters = (0 until count).map { arity ->
-        val functionClass = functionClassesByArity[arity]
-        if (functionClass != null) {
-            val bridge = BlockPointerBridge(numberOfParameters = functionClass.arity, returnsVoid = false)
+    val arityLimit = (functionClassesByArity.keys.maxOrNull() ?: -1) + 1
+
+    val converters = (0 until arityLimit).map { arity ->
+        functionClassesByArity[arity]?.let {
+            val bridge = BlockPointerBridge(numberOfParameters = arity, returnsVoid = false)
             constPointer(blockToKotlinFunctionConverter(bridge))
-        } else {
-            NullPointer(objCToKotlinFunctionType)
-        }
+        } ?: NullPointer(objCToKotlinFunctionType)
     }
 
     val ptr = staticData.placeGlobalArray(
@@ -647,7 +635,7 @@ private fun ObjCExportBlockCodeGenerator.emitBlockToKotlinFunctionConverters() {
 
     // Note: defining globals declared in runtime.
     staticData.placeGlobal("Kotlin_ObjCExport_blockToFunctionConverters", ptr, isExported = true)
-    staticData.placeGlobal("Kotlin_ObjCExport_blockToFunctionConverters_size", Int32(count), isExported = true)
+    staticData.placeGlobal("Kotlin_ObjCExport_blockToFunctionConverters_size", Int32(arityLimit), isExported = true)
 }
 
 private fun ObjCExportCodeGenerator.emitSpecialClassesConvertions() {
@@ -889,7 +877,7 @@ private fun ObjCExportCodeGenerator.generateObjCImp(
 
 private fun ObjCExportCodeGenerator.generateExceptionTypeInfoArray(baseMethod: IrFunction): LLVMValueRef =
         exceptionTypeInfoArrays.getOrPut(baseMethod) {
-            val types = computesThrowsClasses(baseMethod)
+            val types = effectiveThrowsClasses(baseMethod, symbols)
             generateTypeInfoArray(types.toSet())
         }.llvm
 
@@ -899,16 +887,22 @@ private fun ObjCExportCodeGenerator.generateTypeInfoArray(types: Set<IrClass>): 
             codegen.staticData.placeGlobalConstArray("", codegen.kTypeInfoPtr, typeInfos)
         }
 
-private fun computesThrowsClasses(method: IrFunction): List<IrClass> {
-    // Note: frontend ensures that all topmost overridden methods have equal @Throws annotations.
-    // However due to linking different versions of libraries IR could end up not meeting this condition.
-    // Handling this gracefully below.
-
+private fun effectiveThrowsClasses(method: IrFunction, symbols: KonanSymbols): List<IrClass> {
     if (method is IrSimpleFunction && method.overriddenSymbols.isNotEmpty()) {
-        return computesThrowsClasses(method.overriddenSymbols.first().owner)
+        return effectiveThrowsClasses(method.overriddenSymbols.first().owner, symbols)
     }
 
-    val throwsVararg = method.annotations.findAnnotation(KonanFqNames.throws)?.getValueArgument(0)
+    val throwsAnnotation = method.annotations.findAnnotation(KonanFqNames.throws)
+            ?: return if (method.isSuspend) {
+                listOf(symbols.cancellationException.owner)
+            } else {
+                // Note: frontend ensures that all topmost overridden methods have (equal) @Throws annotations.
+                // However due to linking different versions of libraries IR could end up not meeting this condition.
+                // Handling missing annotation gracefully:
+                emptyList()
+            }
+
+    val throwsVararg = throwsAnnotation.getValueArgument(0)
             ?: return emptyList()
 
     if (throwsVararg !is IrVararg) error(method.getContainingFile(), throwsVararg, "unexpected vararg")

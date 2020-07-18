@@ -20,6 +20,7 @@ import org.jetbrains.kotlin.config.languageVersionSettings
 import org.jetbrains.kotlin.descriptors.*
 import org.jetbrains.kotlin.incremental.components.NoLookupLocation
 import org.jetbrains.kotlin.ir.declarations.IrModuleFragment
+import org.jetbrains.kotlin.ir.descriptors.IrBuiltIns
 import org.jetbrains.kotlin.ir.symbols.IrClassSymbol
 import org.jetbrains.kotlin.ir.symbols.IrFunctionSymbol
 import org.jetbrains.kotlin.ir.symbols.IrSimpleFunctionSymbol
@@ -42,10 +43,11 @@ internal class KonanIr(context: Context, irModule: IrModuleFragment): Ir<Context
 
 internal class KonanSymbols(
         context: Context,
+        irBuiltIns: IrBuiltIns,
         private val symbolTable: SymbolTable,
         lazySymbolTable: ReferenceSymbolTable,
         val functionIrClassFactory: BuiltInFictitiousFunctionIrClassFactory
-): Symbols<Context>(context, symbolTable) {
+): Symbols<Context>(context, irBuiltIns, symbolTable) {
 
     val entryPoint = findMainEntryPoint(context)?.let { symbolTable.referenceSimpleFunction(it) }
 
@@ -63,10 +65,10 @@ internal class KonanSymbols(
 
     private fun unsignedClass(unsignedType: UnsignedType): IrClassSymbol = classById(unsignedType.classId)
 
-    val uByte = unsignedClass(UnsignedType.UBYTE)
-    val uShort = unsignedClass(UnsignedType.USHORT)
-    val uInt = unsignedClass(UnsignedType.UINT)
-    val uLong = unsignedClass(UnsignedType.ULONG)
+    override val uByte = unsignedClass(UnsignedType.UBYTE)
+    override val uShort = unsignedClass(UnsignedType.USHORT)
+    override val uInt = unsignedClass(UnsignedType.UINT)
+    override val uLong = unsignedClass(UnsignedType.ULONG)
 
     val signedIntegerClasses = setOf(byte, short, int, long)
     val unsignedIntegerClasses = setOf(uByte, uShort, uInt, uLong)
@@ -258,6 +260,8 @@ internal class KonanSymbols(
 
     override val ThrowTypeCastException = internalFunction("ThrowTypeCastException")
 
+    override val ThrowKotlinNothingValueException  = internalFunction("ThrowKotlinNothingValueException")
+
     val throwClassCastException = internalFunction("ThrowClassCastException")
 
     val throwInvalidReceiverTypeException = internalFunction("ThrowInvalidReceiverTypeException")
@@ -405,6 +409,8 @@ internal class KonanSymbols(
                     .filterNot { it.isExpect }.single().getter!!
     )
 
+    val cancellationException = topLevelClass(KonanFqNames.cancellationException)
+
     val kotlinResult = topLevelClass("kotlin.Result")
 
     val kotlinResultGetOrThrow = symbolTable.referenceSimpleFunction(
@@ -514,13 +520,13 @@ internal class KonanSymbols(
                     .getContributedClassifier(Name.identifier(name), NoLookupLocation.FROM_BACKEND) as ClassDescriptor
     )
 
-    override fun functionN(n: Int) = functionIrClassFactory.function(n).symbol
+    override fun functionN(n: Int) = functionIrClassFactory.functionN(n).symbol
 
-    override fun suspendFunctionN(n: Int) = functionIrClassFactory.suspendFunction(n).symbol
+    override fun suspendFunctionN(n: Int) = functionIrClassFactory.suspendFunctionN(n).symbol
 
-    fun kFunctionN(n: Int) = functionIrClassFactory.kFunction(n).symbol
+    fun kFunctionN(n: Int) = functionIrClassFactory.kFunctionN(n).symbol
 
-    fun kSuspendFunctionN(n: Int) = functionIrClassFactory.kSuspendFunction(n).symbol
+    fun kSuspendFunctionN(n: Int) = functionIrClassFactory.kSuspendFunctionN(n).symbol
 
     fun getKFunctionType(returnType: IrType, parameterTypes: List<IrType>) =
             kFunctionN(parameterTypes.size).typeWith(parameterTypes + returnType)

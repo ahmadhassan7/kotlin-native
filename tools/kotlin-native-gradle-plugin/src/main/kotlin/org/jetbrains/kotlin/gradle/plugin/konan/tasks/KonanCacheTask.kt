@@ -4,6 +4,7 @@ import org.gradle.api.DefaultTask
 import org.gradle.api.provider.Property
 import org.gradle.api.tasks.*
 import org.jetbrains.kotlin.gradle.plugin.konan.KonanCompilerRunner
+import org.jetbrains.kotlin.gradle.plugin.konan.hostManager
 import org.jetbrains.kotlin.gradle.plugin.konan.konanHome
 import org.jetbrains.kotlin.konan.target.CompilerOutputKind
 import org.jetbrains.kotlin.konan.target.HostManager
@@ -30,15 +31,11 @@ open class KonanCacheTask: DefaultTask() {
     val cacheDirectory: File
         get() = cacheRoot.resolve("$target-g$cacheKind")
 
-    @get:OutputFile
+    @get:OutputDirectory
     protected val cacheFile: File
         get() {
-            val konanTarget = HostManager().targetByName(target)
             val klibName = originalKlib.nameWithoutExtension
-            val cachePrefix = cacheKind.outputKind.prefix(konanTarget)
-            val cacheSuffix = cacheKind.outputKind.suffix(konanTarget)
-            val cacheName = "${cachePrefix}${klibName}-cache${cacheSuffix}"
-            return cacheDirectory.resolve(cacheName)
+            return cacheDirectory.resolve("${klibName}-cache")
         }
 
     @Input

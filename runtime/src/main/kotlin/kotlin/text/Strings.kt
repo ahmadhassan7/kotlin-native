@@ -82,16 +82,6 @@ public actual fun String.replaceFirst(oldValue: String, newValue: String, ignore
 }
 
 /**
- * Returns a copy of this string having its first letter lowercased, or the original string,
- * if it's empty or already starts with a lower case letter.
- *
- * @sample samples.text.Strings.decapitalize
- */
-public actual fun String.decapitalize(): String {
-    return if (isNotEmpty() && this[0].isUpperCase()) substring(0, 1).toLowerCase() + substring(1) else this
-}
-
-/**
  * Returns `true` if this string is empty or consists solely of whitespace characters.
  *
  * @sample samples.text.Strings.stringIsBlank
@@ -184,13 +174,26 @@ public actual fun String.toCharArray(): CharArray = toCharArray(this, 0, length)
 private external fun toCharArray(string: String, start: Int, size: Int): CharArray
 
 /**
- * Returns a copy of this string having its first letter uppercased, or the original string,
- * if it's empty or already starts with an upper case letter.
+ * Returns a copy of this string having its first letter titlecased using the rules of the default locale,
+ * or the original string if it's empty or already starts with a title case letter.
+ *
+ * The title case of a character is usually the same as its upper case with several exceptions.
+ * The particular list of characters with the special title case form depends on the underlying platform.
  *
  * @sample samples.text.Strings.capitalize
  */
 public actual fun String.capitalize(): String {
     return if (isNotEmpty() && this[0].isLowerCase()) substring(0, 1).toUpperCase() + substring(1) else this
+}
+
+/**
+ * Returns a copy of this string having its first letter lowercased using the rules of the default locale,
+ * or the original string if it's empty or already starts with a lower case letter.
+ *
+ * @sample samples.text.Strings.decapitalize
+ */
+public actual fun String.decapitalize(): String {
+    return if (isNotEmpty() && !this[0].isLowerCase()) substring(0, 1).toLowerCase() + substring(1) else this
 }
 
 /**
@@ -223,6 +226,7 @@ public actual fun CharSequence.repeat(n: Int): String {
 /**
  * Converts the characters in the specified array to a string.
  */
+@Deprecated("Use CharArray.concatToString() instead", ReplaceWith("chars.concatToString()"))
 public actual fun String(chars: CharArray): String = chars.concatToString()
 
 /**
@@ -231,6 +235,7 @@ public actual fun String(chars: CharArray): String = chars.concatToString()
  * @throws IndexOutOfBoundsException if either [offset] or [length] are less than zero
  * or `offset + length` is out of [chars] array bounds.
  */
+@Deprecated("Use CharArray.concatToString(startIndex, endIndex) instead", ReplaceWith("chars.concatToString(offset, offset + length)"))
 public actual fun String(chars: CharArray, offset: Int, length: Int): String {
     if (offset < 0 || length < 0 || offset + length > chars.size)
         throw ArrayIndexOutOfBoundsException()

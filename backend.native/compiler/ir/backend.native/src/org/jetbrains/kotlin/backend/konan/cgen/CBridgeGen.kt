@@ -1,6 +1,6 @@
 package org.jetbrains.kotlin.backend.konan.cgen
 
-import org.jetbrains.kotlin.backend.common.ir.addFakeOverrides
+import org.jetbrains.kotlin.backend.common.ir.addFakeOverridesViaIncorrectHeuristic
 import org.jetbrains.kotlin.backend.common.ir.createDispatchReceiverParameter
 import org.jetbrains.kotlin.backend.common.ir.createParameterDeclarations
 import org.jetbrains.kotlin.backend.common.ir.simpleFunctions
@@ -101,7 +101,7 @@ private fun KotlinToCCallBuilder.addArgument(
     if (!variadic) cFunctionBuilder.addParameter(cArgument.type)
 }
 
-private fun KotlinToCCallBuilder.buildKotlinBridgeCall(transformCall: (IrMemberAccessExpression) -> IrExpression = { it }): IrExpression =
+private fun KotlinToCCallBuilder.buildKotlinBridgeCall(transformCall: (IrMemberAccessExpression<*>) -> IrExpression = { it }): IrExpression =
         bridgeCallBuilder.build(
                 bridgeBuilder.buildKotlinBridge().also {
                     this.stubs.addKotlin(it)
@@ -1207,7 +1207,7 @@ private class ObjCBlockPointerValuePassing(
         }
     }
 
-    private fun IrBuilderWithScope.generateKotlinFunctionClass(): IrConstructorImpl {
+    private fun IrBuilderWithScope.generateKotlinFunctionClass(): IrConstructor {
         val symbols = stubs.symbols
 
         val classDescriptor = WrappedClassDescriptor()
@@ -1318,7 +1318,7 @@ private class ObjCBlockPointerValuePassing(
             +irReturn(callBlock(blockPointer, arguments))
         }
 
-        irClass.addFakeOverrides()
+        irClass.addFakeOverridesViaIncorrectHeuristic()
 
         stubs.addKotlin(irClass)
         return constructor

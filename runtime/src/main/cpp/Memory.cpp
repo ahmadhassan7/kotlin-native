@@ -20,7 +20,7 @@
 #include <cstddef> // for offsetof
 
 // Allow concurrent global cycle collector.
-#define USE_CYCLIC_GC 1
+#define USE_CYCLIC_GC 0
 
 #include "Alloc.h"
 #include "KAssert.h"
@@ -35,6 +35,7 @@
 #include "Natives.h"
 #include "Porting.h"
 #include "Runtime.h"
+#include "WorkerBoundReference.h"
 
 // If garbage collection algorithm for cyclic garbage to be used.
 // We are using the Bacon's algorithm for GC, see
@@ -46,6 +47,8 @@
 #define TRACE_GC 0
 // Collect memory manager events statistics.
 #define COLLECT_STATISTIC 0
+// Define to 1 to print detailed time statistics for GC events.
+#define PROFILE_GC 0
 
 #if COLLECT_STATISTIC
 #include <algorithm>
@@ -86,11 +89,19 @@ constexpr double kGcToComputeRatioThreshold = 0.5;
 // Never exceed this value when increasing GC threshold.
 constexpr size_t kMaxErgonomicThreshold = 32 * 1024;
 // Threshold of size for toFree set, triggering actual cycle collector.
-constexpr size_t kMaxToFreeSize = 8 * 1024;
+constexpr size_t kMaxToFreeSizeThreshold = 8 * 1024;
+// Never exceed this value when increasing size for toFree set, triggering actual cycle collector.
+constexpr size_t kMaxErgonomicToFreeSizeThreshold = 8 * 1024 * 1024;
 // How many elements in finalizer queue allowed before cleaning it up.
 constexpr size_t kFinalizerQueueThreshold = 32;
 // If allocated that much memory since last GC - force new GC.
 constexpr size_t kMaxGcAllocThreshold = 8 * 1024 * 1024;
+// If the ratio of GC collection cycles time to program execution time is greater this value,
+// increase GC threshold for cycles collection.
+constexpr double kGcCollectCyclesLoadRatio = 0.3;
+// Minimum time of cycles collection to change thresholds.
+constexpr size_t kGcCollectCyclesMinimumDuration = 200;
+
 #endif  // USE_GC
 
 typedef KStdUnorderedSet<ContainerHeader*> ContainerHeaderSet;
@@ -436,6 +447,8 @@ struct MemoryState {
   int gcSuspendCount;
   // How many candidate elements in toRelease shall trigger collection.
   size_t gcThreshold;
+  // How many candidate elements in toFree shall trigger cycle collection.
+  uint64_t gcCollectCyclesThreshold;
   // If collection is in progress.
   bool gcInProgress;
   // Objects to be released.
@@ -445,11 +458,15 @@ struct MemoryState {
 
   bool gcErgonomics;
   uint64_t lastGcTimestamp;
+  uint64_t lastCyclicGcTimestamp;
   uint32_t gcEpoque;
 
   uint64_t allocSinceLastGc;
   uint64_t allocSinceLastGcThreshold;
 #endif // USE_GC
+
+  // A stack of initializing singletons.
+  KStdVector<std::pair<ObjHeader**, ObjHeader*>> initializingSingletons;
 
 #if COLLECT_STATISTIC
   #define CONTAINER_ALLOC_STAT(state, size, container) state->statistic.incAlloc(size, container);
@@ -925,11 +942,17 @@ void freeAggregatingFrozenContainer(ContainerHeader* container) {
   MEMORY_LOG("Freeing subcontainers done\n");
 }
 
-void runDeallocationHooks(ContainerHeader* container) {
+// This is called from 2 places where it's unconditionally called,
+// so better be inlined.
+ALWAYS_INLINE void runDeallocationHooks(ContainerHeader* container) {
   ObjHeader* obj = reinterpret_cast<ObjHeader*>(container + 1);
   for (int index = 0; index < container->objectCount(); index++) {
+    auto* type_info = obj->type_info();
+    if (type_info == theWorkerBoundReferenceTypeInfo) {
+      DisposeWorkerBoundReference(obj);
+    }
 #if USE_CYCLIC_GC
-    if ((obj->type_info()->flags_ & TF_LEAK_DETECTOR_CANDIDATE) != 0) {
+    if ((type_info->flags_ & TF_LEAK_DETECTOR_CANDIDATE) != 0) {
       cyclicRemoveAtomicRoot(obj);
     }
 #endif  // USE_CYCLIC_GC
@@ -1155,10 +1178,22 @@ inline void initGcThreshold(MemoryState* state, uint32_t gcThreshold) {
   state->toRelease->reserve(gcThreshold);
 }
 
+inline void initGcCollectCyclesThreshold(MemoryState* state, uint64_t gcCollectCyclesThreshold) {
+  state->gcCollectCyclesThreshold = gcCollectCyclesThreshold;
+  state->toFree->reserve(gcCollectCyclesThreshold);
+}
+
 inline void increaseGcThreshold(MemoryState* state) {
   auto newThreshold = state->gcThreshold * 3 / 2 + 1;
   if (newThreshold <= kMaxErgonomicThreshold) {
     initGcThreshold(state, newThreshold);
+  }
+}
+
+inline void increaseGcCollectCyclesThreshold(MemoryState* state) {
+  auto newThreshold = state->gcCollectCyclesThreshold * 2;
+  if (newThreshold <= kMaxErgonomicToFreeSizeThreshold) {
+    initGcCollectCyclesThreshold(state, newThreshold);
   }
 }
 
@@ -1594,29 +1629,67 @@ void garbageCollect(MemoryState* state, bool force) {
   if (g_hasCyclicCollector)
     cyclicLocalGC();
 #endif  // USE_CYCLIC_GC
+#if PROFILE_GC
+  auto processDecrementsStartTime = konan::getTimeMicros();
+#endif
   processDecrements(state);
+#if PROFILE_GC
+  auto processDecrementsDuration = konan::getTimeMicros() - processDecrementsStartTime;
+  GC_LOG("||| GC: processDecrementsDuration = %lld\n", processDecrementsDuration);
+  auto decrementStackStartTime = konan::getTimeMicros();
+#endif
   size_t beforeDecrements = state->toRelease->size();
   decrementStack(state);
   size_t afterDecrements = state->toRelease->size();
+#if PROFILE_GC
+  auto decrementStackDuration = konan::getTimeMicros() - decrementStackStartTime;
+  GC_LOG("||| GC: decrementStackDuration = %lld\n", decrementStackDuration);
+#endif
   long stackReferences = afterDecrements - beforeDecrements;
   if (state->gcErgonomics && stackReferences * 5 > state->gcThreshold) {
     increaseGcThreshold(state);
-    GC_LOG("||| GC: too many stack references, increased threshold to \n", state->gcThreshold);
+    GC_LOG("||| GC: too many stack references, increased threshold to %d\n", state->gcThreshold);
   }
 
   GC_LOG("||| GC: toFree %d toRelease %d\n", state->toFree->size(), state->toRelease->size())
-
+#if PROFILE_GC
+  auto processFinalizerQueueStartTime = konan::getTimeMicros();
+#endif
   processFinalizerQueue(state);
+#if PROFILE_GC
+  auto processFinalizerQueueDuration = konan::getTimeMicros() - processFinalizerQueueStartTime;
+  GC_LOG("||| GC: processFinalizerQueueDuration %lld\n", processFinalizerQueueDuration);
+#endif
 
-  if (force || state->toFree->size() > kMaxToFreeSize) {
+  if (force || state->toFree->size() > state->gcCollectCyclesThreshold) {
+    auto cyclicGcStartTime = konan::getTimeMicros();
     while (state->toFree->size() > 0) {
       collectCycles(state);
+      #if PROFILE_GC
+        processFinalizerQueueStartTime = konan::getTimeMicros();
+      #endif
       processFinalizerQueue(state);
+      #if PROFILE_GC
+        processFinalizerQueueDuration += konan::getTimeMicros() - processFinalizerQueueStartTime;
+        GC_LOG("||| GC: processFinalizerQueueDuration = %lld\n", processFinalizerQueueDuration);
+      #endif
     }
+    auto cyclicGcEndTime = konan::getTimeMicros();
+    #if PROFILE_GC
+      GC_LOG("||| GC: collectCyclesDuration = %lld\n", cyclicGcEndTime - cyclicGcStartTime);
+    #endif
+    auto cyclicGcDuration = cyclicGcEndTime - cyclicGcStartTime;
+    if (state->gcErgonomics && cyclicGcDuration > kGcCollectCyclesMinimumDuration &&
+        double(cyclicGcDuration) / (cyclicGcStartTime - state->lastCyclicGcTimestamp + 1) > kGcCollectCyclesLoadRatio) {
+      increaseGcCollectCyclesThreshold(state);
+      GC_LOG("Adjusting GC collecting cycles threshold to %lld\n", state->gcCollectCyclesThreshold);
+    }
+    state->lastCyclicGcTimestamp = cyclicGcEndTime;
   }
 
   state->gcInProgress = false;
   auto gcEndTime = konan::getTimeMicros();
+
   if (state->gcErgonomics) {
     auto gcToComputeRatio = double(gcEndTime - gcStartTime) / (gcStartTime - state->lastGcTimestamp + 1);
     if (gcToComputeRatio > kGcToComputeRatioThreshold) {
@@ -1624,7 +1697,7 @@ void garbageCollect(MemoryState* state, bool force) {
       GC_LOG("Adjusting GC threshold to %d\n", state->gcThreshold);
     }
   }
-  GC_LOG("GC: duration=%lld sinceLast=%lld\n", (gcEndTime - gcStartTime), gcStartTime - state->lastGcTimestamp);
+  GC_LOG("GC: gcToComputeRatio=%f duration=%lld sinceLast=%lld\n", double(gcEndTime - gcStartTime) / (gcStartTime - state->lastGcTimestamp + 1), (gcEndTime - gcStartTime), gcStartTime - state->lastGcTimestamp);
   state->lastGcTimestamp = gcEndTime;
 
 #if TRACE_MEMORY
@@ -1651,14 +1724,6 @@ void garbageCollect() {
 }
 
 #endif  // USE_GC
-
-void deinitInstanceBody(const TypeInfo* typeInfo, void* body) {
-  for (int index = 0; index < typeInfo->objOffsetsCount_; index++) {
-    ObjHeader** location = reinterpret_cast<ObjHeader**>(
-        reinterpret_cast<uintptr_t>(body) + typeInfo->objOffsets_[index]);
-    ZeroHeapRef(location);
-  }
-}
 
 ForeignRefManager* initLocalForeignRef(ObjHeader* object) {
   if (!IsStrictMemoryModel) return nullptr;
@@ -1732,6 +1797,7 @@ MemoryState* initMemory() {
   memoryState->gcSuspendCount = 0;
   memoryState->toRelease = konanConstructInstance<ContainerHeaderList>();
   initGcThreshold(memoryState, kGcThreshold);
+  initGcCollectCyclesThreshold(memoryState, kMaxToFreeSizeThreshold);
   memoryState->allocSinceLastGcThreshold = kMaxGcAllocThreshold;
   memoryState->gcErgonomics = true;
 #endif
@@ -1924,6 +1990,7 @@ inline void checkIfGcNeeded(MemoryState* state) {
   if (state != nullptr && state->allocSinceLastGc > state->allocSinceLastGcThreshold) {
     // To avoid GC trashing check that at least 10ms passed since last GC.
     if (konan::getTimeMicros() - state->lastGcTimestamp > 10 * 1000) {
+      GC_LOG("Calling GC from checkIfGcNeeded: %d\n", state->toRelease->size())
       garbageCollect(state, false);
     }
   }
@@ -1938,11 +2005,6 @@ OBJ_GETTER(allocInstance, const TypeInfo* type_info) {
 #endif  // USE_GC
   auto container = ObjectContainer(state, type_info);
   ObjHeader* obj = container.GetPlace();
-#if USE_CYCLIC_GC
-  if ((obj->type_info()->flags_ & TF_LEAK_DETECTOR_CANDIDATE) != 0) {
-    cyclicAddAtomicRoot(obj);
-  }
-#endif  // USE_CYCLIC_GC
 #if USE_GC
   if (Strict) {
     rememberNewContainer(container.header());
@@ -1950,6 +2012,14 @@ OBJ_GETTER(allocInstance, const TypeInfo* type_info) {
     makeShareable(container.header());
   }
 #endif  // USE_GC
+#if USE_CYCLIC_GC
+  if ((obj->type_info()->flags_ & TF_LEAK_DETECTOR_CANDIDATE) != 0) {
+    // Note: this should be performed after [rememberNewContainer] (above).
+    // Otherwise cyclic collector can observe this atomic root with RC = 0,
+    // thus consider it garbage and then zero it after initialization.
+    cyclicAddAtomicRoot(obj);
+  }
+#endif  // USE_CYCLIC_GC
   RETURN_OBJ(obj);
 }
 
@@ -1999,7 +2069,7 @@ OBJ_GETTER(initInstance,
 
 template <bool Strict>
 OBJ_GETTER(initSharedInstance,
-    ObjHeader** location, ObjHeader** localLocation, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*)) {
+    ObjHeader** location, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*)) {
 #if KONAN_NO_THREADS
   ObjHeader* value = *location;
   if (value != nullptr) {
@@ -2025,25 +2095,31 @@ OBJ_GETTER(initSharedInstance,
   }
 #endif  // KONAN_NO_EXCEPTIONS
 #else  // KONAN_NO_THREADS
-  ObjHeader* value = *localLocation;
-  if (value != nullptr) RETURN_OBJ(value);
+  // Search from the top of the stack.
+  for (auto it = memoryState->initializingSingletons.rbegin(); it != memoryState->initializingSingletons.rend(); ++it) {
+    if (it->first == location) {
+      RETURN_OBJ(it->second);
+    }
+  }
 
   ObjHeader* initializing = reinterpret_cast<ObjHeader*>(1);
 
   // Spin lock.
+  ObjHeader* value = nullptr;
   while ((value = __sync_val_compare_and_swap(location, nullptr, initializing)) == initializing);
   if (value != nullptr) {
     // OK'ish, inited by someone else.
     RETURN_OBJ(value);
   }
   ObjHeader* object = AllocInstance(typeInfo, OBJ_RESULT);
-  UpdateHeapRef(localLocation, object);
+  memoryState->initializingSingletons.push_back(std::make_pair(location, object));
 #if KONAN_NO_EXCEPTIONS
   ctor(object);
   if (Strict)
     FreezeSubgraph(object);
   UpdateHeapRef(location, object);
   synchronize();
+  memoryState->initializingSingletons.pop_back();
   return object;
 #else  // KONAN_NO_EXCEPTIONS
   try {
@@ -2052,11 +2128,12 @@ OBJ_GETTER(initSharedInstance,
       FreezeSubgraph(object);
     UpdateHeapRef(location, object);
     synchronize();
+    memoryState->initializingSingletons.pop_back();
     return object;
   } catch (...) {
     UpdateReturnRef(OBJ_RESULT, nullptr);
     zeroHeapRef(location);
-    zeroHeapRef(localLocation);
+    memoryState->initializingSingletons.pop_back();
     synchronize();
     throw;
   }
@@ -2232,9 +2309,10 @@ void startGC() {
 
 void setGCThreshold(KInt value) {
   GC_LOG("setGCThreshold %d\n", value)
-  if (value > 0) {
-    initGcThreshold(memoryState, value);
+  if (value <= 0) {
+    ThrowIllegalArgumentException();
   }
+  initGcThreshold(memoryState, value);
 }
 
 KInt getGCThreshold() {
@@ -2242,11 +2320,26 @@ KInt getGCThreshold() {
   return memoryState->gcThreshold;
 }
 
+void setGCCollectCyclesThreshold(KLong value) {
+  GC_LOG("setGCCollectCyclesThreshold %d\n", value)
+  if (value <= 0) {
+    ThrowIllegalArgumentException();
+  }
+  initGcCollectCyclesThreshold(memoryState, value);
+}
+
+KInt getGCCollectCyclesThreshold() {
+  GC_LOG("getGCCollectCyclesThreshold\n")
+  return memoryState->gcCollectCyclesThreshold;
+}
+
 void setGCThresholdAllocations(KLong value) {
   GC_LOG("setGCThresholdAllocations %lld\n", value)
-  if (value > 0) {
-    memoryState->allocSinceLastGcThreshold = value;
+  if (value <= 0) {
+    ThrowIllegalArgumentException();
   }
+
+  memoryState->allocSinceLastGcThreshold = value;
 }
 
 KLong getGCThresholdAllocations() {
@@ -2735,10 +2828,6 @@ void ReleaseHeapRefRelaxed(const ObjHeader* object) {
   releaseHeapRef<false>(const_cast<ObjHeader*>(object));
 }
 
-void DeinitInstanceBody(const TypeInfo* typeInfo, void* body) {
-  deinitInstanceBody(typeInfo, body);
-}
-
 ForeignRefContext InitLocalForeignRef(ObjHeader* object) {
   return initLocalForeignRef(object);
 }
@@ -2803,12 +2892,12 @@ OBJ_GETTER(InitInstanceRelaxed,
 }
 
 OBJ_GETTER(InitSharedInstanceStrict,
-    ObjHeader** location, ObjHeader** localLocation, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*)) {
-  RETURN_RESULT_OF(initSharedInstance<true>, location, localLocation, typeInfo, ctor);
+    ObjHeader** location, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*)) {
+  RETURN_RESULT_OF(initSharedInstance<true>, location, typeInfo, ctor);
 }
 OBJ_GETTER(InitSharedInstanceRelaxed,
-    ObjHeader** location, ObjHeader** localLocation, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*)) {
-  RETURN_RESULT_OF(initSharedInstance<false>, location, localLocation, typeInfo, ctor);
+    ObjHeader** location, const TypeInfo* typeInfo, void (*ctor)(ObjHeader*)) {
+  RETURN_RESULT_OF(initSharedInstance<false>, location, typeInfo, ctor);
 }
 
 void SetStackRefStrict(ObjHeader** location, const ObjHeader* object) {
@@ -2940,6 +3029,20 @@ void Kotlin_native_internal_GC_setThreshold(KRef, KInt value) {
 KInt Kotlin_native_internal_GC_getThreshold(KRef) {
 #if USE_GC
   return getGCThreshold();
+#else
+  return -1;
+#endif
+}
+
+void Kotlin_native_internal_GC_setCollectCyclesThreshold(KRef, KLong value) {
+#if USE_GC
+  setGCCollectCyclesThreshold(value);
+#endif
+}
+
+KLong Kotlin_native_internal_GC_getCollectCyclesThreshold(KRef) {
+#if USE_GC
+  return getGCCollectCyclesThreshold();
 #else
   return -1;
 #endif

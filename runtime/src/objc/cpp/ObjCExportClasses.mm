@@ -9,8 +9,6 @@
 
 #if KONAN_OBJC_INTEROP
 
-#define OBJC_OLD_DISPATCH_PROTOTYPES 1
-
 #import <Foundation/NSObject.h>
 #import <Foundation/NSValue.h>
 #import <Foundation/NSString.h>
@@ -36,12 +34,22 @@ extern "C" id objc_autoreleaseReturnValue(id self);
 -(BOOL)_tryRetain;
 @end;
 
+static void injectToRuntime();
+
+// Note: `KotlinBase`'s `toKotlin` and `_tryRetain` methods will terminate if
+// called with non-frozen object on a wrong worker. `retain` will also terminate
+// in these conditions if backref's refCount is zero.
+
 @implementation KotlinBase {
   BackRefFromAssociatedObject refHolder;
 }
 
 -(KRef)toKotlin:(KRef*)OBJ_RESULT {
-  RETURN_OBJ(refHolder.ref());
+  RETURN_OBJ(refHolder.ref<ErrorPolicy::kTerminate>());
+}
+
++(void)load {
+  injectToRuntime();
 }
 
 +(void)initialize {
@@ -99,7 +107,7 @@ extern "C" id objc_autoreleaseReturnValue(id self);
   if (refHolder.permanent()) { // TODO: consider storing `isPermanent` to self field.
     [super retain];
   } else {
-    refHolder.addRef();
+    refHolder.addRef<ErrorPolicy::kTerminate>();
   }
   return self;
 }
@@ -108,7 +116,7 @@ extern "C" id objc_autoreleaseReturnValue(id self);
   if (refHolder.permanent()) {
     return [super _tryRetain];
   } else {
-    return refHolder.tryAddRef();
+    return refHolder.tryAddRef<ErrorPolicy::kTerminate>();
   }
 }
 
@@ -204,7 +212,6 @@ OBJ_GETTER(Kotlin_boxDouble, KDouble value);
 }
 @end;
 
-__attribute__((constructor))
 static void injectToRuntime() {
   RuntimeCheck(Kotlin_ObjCExport_toKotlinSelector == nullptr, "runtime injected twice");
   Kotlin_ObjCExport_toKotlinSelector = @selector(toKotlin:);

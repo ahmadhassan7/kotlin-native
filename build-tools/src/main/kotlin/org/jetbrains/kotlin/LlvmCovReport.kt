@@ -1,24 +1,21 @@
 package org.jetbrains.kotlin
 
-import kotlinx.serialization.*
-import kotlinx.serialization.internal.StringDescriptor
-import kotlinx.serialization.json.Json
+import com.google.gson.*
+import com.google.gson.annotations.*
 
 
-@Serializable
 data class LlvmCovReportFunction(
-        val name: String,
-        val count: Int,
-        val regions: List<List<Int>>,
-        val filenames: List<String>
+        @Expose val name: String,
+        @Expose val count: Int,
+        @Expose val regions: List<List<Int>>,
+        @Expose val filenames: List<String>
 )
 
-@Serializable
 data class LlvmCovReportSummary(
-        val lines: LlvmCovReportStatistics,
-        val functions: LlvmCovReportStatistics,
-        val instantiations: LlvmCovReportStatistics,
-        val regions: LlvmCovReportStatistics
+        @Expose val lines: LlvmCovReportStatistics,
+        @Expose val functions: LlvmCovReportStatistics,
+        @Expose val instantiations: LlvmCovReportStatistics,
+        @Expose val regions: LlvmCovReportStatistics
 
 )
 
@@ -27,35 +24,30 @@ data class LlvmCovReportSummary(
  *  It's a bit complicated since every segment
  *  is encoded not as dictionary, but as array of ints and bools.
  */
-@Serializable
 data class LlvmCovReportFile(
-        val filename: String,
-        val summary: LlvmCovReportSummary
+        @Expose val filename: String,
+        @Expose val summary: LlvmCovReportSummary
 )
 
-@Serializable
 data class LlvmCovReportStatistics(
-    val count: Int,
-    val covered: Int,
-    val percent: Double
+    @Expose val count: Int,
+    @Expose val covered: Int,
+    @Expose val percent: Double
 )
 
-@Serializable
 data class LlvmCovReportData(
-        val files: List<LlvmCovReportFile>,
-        val functions: List<LlvmCovReportFunction>,
-        val totals: LlvmCovReportSummary
+        @Expose val files: List<LlvmCovReportFile>,
+        @Expose val functions: List<LlvmCovReportFunction>,
+        @Expose val totals: LlvmCovReportSummary
 )
 
-@Serializable
 data class LlvmCovReport(
-        val version: String,
-        val type: String,
-        val data: List<LlvmCovReportData>
+        @Expose val version: String,
+        @Expose val type: String,
+        @Expose val data: List<LlvmCovReportData>
 )
 
-fun parseLlvmCovReport(llvmCovReport: String): LlvmCovReport =
-        Json.nonstrict.parse(LlvmCovReport.serializer(), llvmCovReport)
+fun parseLlvmCovReport(llvmCovReport: String): LlvmCovReport = gson.fromJson(llvmCovReport, LlvmCovReport::class.java)
 
 val LlvmCovReport.isValid
     get() = type == "llvm.coverage.json.export"

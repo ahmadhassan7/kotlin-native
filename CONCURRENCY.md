@@ -94,7 +94,7 @@ future.consume {
   concurrent threads, if the worker mechanisms are insufficient for a particular task. Note, that object detachment
   may require explicit leaving function holding object references and then performing cyclic garbage collection.
   For example, code like:
-```$kotlin
+```kotlin
 val graph = DetachedObjectGraph {
     val map = mutableMapOf<String, String>()
     for (entry in map.entries) {
@@ -104,7 +104,7 @@ val graph = DetachedObjectGraph {
 }
 ```
   will not work as expected and will throw runtime exception, as there are uncollected cycles in the detached graph, while:
-```$kotlin
+```kotlin
 val graph = DetachedObjectGraph {
     {
      val map = mutableMapOf<String, String>()
@@ -199,10 +199,10 @@ To achieve such functionality Kotlin/Native runtime provides two related classes
 `kotlin.native.concurrent.AtomicReference` and `kotlin.native.concurrent.FreezableAtomicReference`.
 Atomic reference holds reference to a frozen or immutable object, and its value could be updated by set
 or compare-and-swap operation. Thus, dedicated set of objects could be used to create mutable shared object graphs
-(of immutable objects). Cycles in the shared memory could be created using atomic references, and to collect them
-Kotlin/Native runtime has special concurrent cycle collector, concurrently analyzing cyclic data rooted in atomic references.
-When cycle of no longer used objects is detected, collector zeroes out reference stored in atomic reference and thus
-allows cycle to be collected.
+(of immutable objects). Cycles in the shared memory could be created using atomic references.
+Kotlin/Native runtime doesn't support garbage collecting cyclic data when reference cycle goes through
+`AtomicReference` or frozen `FreezableAtomicReference`. So to avoid memory leaks atomic references
+that are potentially parts of shared cyclic data should be zeroed out once no longer needed.
 
  If atomic reference value is attempted to be set to non-frozen value runtime exception is thrown.
 

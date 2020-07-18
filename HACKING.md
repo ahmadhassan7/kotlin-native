@@ -76,7 +76,7 @@ To update the blackbox compiler tests set TeamCity build number in `gradle.prope
 
 * **-Pprefix** allows one to choose external test directories to run. Only tests from directories with given prefix will be executed.
 
-        ./gradlew -Pprefix=external_codegen_box_cast run_external
+        ./gradlew -Pprefix=build_external_compiler_codegen_box_cast run_external
 
 * **-Ptest_flags** passes flags to the compiler used to compile tests
 
@@ -109,6 +109,12 @@ and then a final native binary is produced from this klibrary using the -Xinclud
  To measure performance of Kotlin/Native compiler on existing benchmarks:
  
     ./gradlew :performance:konanRun
+
+ **NOTE**: **konanRun** task needs built compiler and libs. To test against working tree make sure to run
+
+    ./gradlew dist distPlatformLibs
+
+ before **konanRun**
     
  **konanRun** task can be run separately for one/several benchmark applications:
  

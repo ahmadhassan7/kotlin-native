@@ -466,6 +466,15 @@ private class InteropLoweringPart1(val context: Context) : BaseInteropIrTransfor
         }
     }
 
+    private fun IrClass.hasFields() =
+            this.declarations.any {
+                when (it) {
+                    is IrField ->  it.isReal
+                    is IrProperty -> it.isReal && it.backingField != null
+                    else -> false
+                }
+            }
+
     private fun checkKotlinObjCClass(irClass: IrClass) {
         val kind = irClass.descriptor.kind
         if (kind != ClassKind.CLASS && kind != ClassKind.OBJECT) {
@@ -480,6 +489,16 @@ private class InteropLoweringPart1(val context: Context) : BaseInteropIrTransfor
                     "Non-final Kotlin subclasses of Objective-C classes are not yet supported",
                     currentFile, irClass
             )
+        }
+
+        irClass.companionObject()?.let {
+            if (it.hasFields() ||
+                    it.getSuperClassNotAny()?.hasFields() ?: false) {
+                context.reportCompilationError(
+                        "Fields are not supported for Companion of subclass of ObjC type",
+                        currentFile, irClass
+                )
+            }
         }
 
         var hasObjCClassSupertype = false
@@ -845,12 +864,14 @@ private class InteropTransformer(val context: Context, override val irFile: IrFi
     override fun visitClass(declaration: IrClass): IrStatement {
         super.visitClass(declaration)
         if (declaration.isKotlinObjCClass()) {
+            val uniq = mutableSetOf<String>()  // remove duplicates [KT-38234]
             val imps = declaration.simpleFunctions().filter { it.isReal }.flatMap { function ->
                 function.overriddenSymbols.mapNotNull {
-                    val info = it.owner.getExternalObjCMethodInfo()
-                    if (info == null) {
+                    val selector = it.owner.getExternalObjCMethodInfo()?.selector
+                    if (selector == null || selector in uniq) {
                         null
                     } else {
+                        uniq += selector
                         generateWithStubs(it.owner) {
                             generateCFunctionAndFakeKotlinExternalFunction(
                                     function,
@@ -929,7 +950,8 @@ private class InteropTransformer(val context: Context, override val irFile: IrFi
             return generateWithStubs { generateCCall(expression, builder, isInvoke = false) }
         }
 
-        tryGenerateInteropMemberAccess(expression, symbols, builder)?.let { return it }
+        val failCompilation = { msg: String -> context.reportCompilationError(msg, irFile, expression) }
+        tryGenerateInteropMemberAccess(expression, symbols, builder, failCompilation)?.let { return it }
 
         tryGenerateInteropConstantRead(expression)?.let { return it }
 

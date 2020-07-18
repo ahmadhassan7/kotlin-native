@@ -58,8 +58,8 @@ actual class StringBuilder private constructor (
         return append(toAppend, 0, toAppend.length)
     }
 
-    @UseExperimental(ExperimentalStdlibApi::class)
-    actual override fun append(value: CharSequence?, startIndex: Int, endIndex: Int): StringBuilder = this.appendRange(value, startIndex, endIndex)
+    actual override fun append(value: CharSequence?, startIndex: Int, endIndex: Int): StringBuilder =
+            this.appendRange(value ?: "null", startIndex, endIndex)
 
     /**
      * Reverses the contents of this string builder and returns this instance.
@@ -176,12 +176,18 @@ actual class StringBuilder private constructor (
         return this
     }
 
+    @Deprecated("Provided for binary compatibility.", level = DeprecationLevel.HIDDEN)
+    fun append(value: String): StringBuilder = append(value)
+
     /**
      * Appends the specified string [value] to this string builder and returns this instance.
+     *
+     * If [value] is `null`, then the four characters `"null"` are appended.
      */
-    actual fun append(value: String): StringBuilder {
-        ensureExtraCapacity(value.length)
-        _length += insertString(array, _length, value)
+    actual fun append(value: String?): StringBuilder {
+        val toAppend = value ?: "null"
+        ensureExtraCapacity(toAppend.length)
+        _length += insertString(array, _length, toAppend)
         return this
     }
 
@@ -212,8 +218,8 @@ actual class StringBuilder private constructor (
      *
      * Returns `-1` if the specified [string] does not occur in this string builder.
      */
-    @SinceKotlin("1.3")
-    @ExperimentalStdlibApi
+    @SinceKotlin("1.4")
+    @WasExperimental(ExperimentalStdlibApi::class)
     actual fun indexOf(string: String): Int {
         return (this as CharSequence).indexOf(string, startIndex = 0, ignoreCase = false)
     }
@@ -224,8 +230,8 @@ actual class StringBuilder private constructor (
      *
      * Returns `-1` if the specified [string] does not occur in this string builder starting at the specified [startIndex].
      */
-    @SinceKotlin("1.3")
-    @ExperimentalStdlibApi
+    @SinceKotlin("1.4")
+    @WasExperimental(ExperimentalStdlibApi::class)
     actual fun indexOf(string: String, startIndex: Int): Int {
         if (string.isEmpty() && startIndex >= _length) return _length
         return (this as CharSequence).indexOf(string, startIndex, ignoreCase = false)
@@ -237,8 +243,8 @@ actual class StringBuilder private constructor (
      *
      * Returns `-1` if the specified [string] does not occur in this string builder.
      */
-    @SinceKotlin("1.3")
-    @ExperimentalStdlibApi
+    @SinceKotlin("1.4")
+    @WasExperimental(ExperimentalStdlibApi::class)
     actual fun lastIndexOf(string: String): Int {
         if (string.isEmpty()) return _length
         return (this as CharSequence).lastIndexOf(string, startIndex = lastIndex, ignoreCase = false)
@@ -250,8 +256,8 @@ actual class StringBuilder private constructor (
      *
      * Returns `-1` if the specified [string] does not occur in this string builder starting at the specified [startIndex].
      */
-    @SinceKotlin("1.3")
-    @ExperimentalStdlibApi
+    @SinceKotlin("1.4")
+    @WasExperimental(ExperimentalStdlibApi::class)
     actual fun lastIndexOf(string: String, startIndex: Int): Int {
         if (string.isEmpty() && startIndex >= _length) return _length
         return (this as CharSequence).lastIndexOf(string, startIndex, ignoreCase = false)
@@ -319,7 +325,6 @@ actual class StringBuilder private constructor (
      *
      * @throws IndexOutOfBoundsException if [index] is less than zero or greater than the length of this string builder.
      */
-    @UseExperimental(ExperimentalStdlibApi::class)
     actual fun insert(index: Int, value: CharSequence?): StringBuilder {
         // Kotlin/JVM inserts the "null" string if the argument is null.
         val toInsert = value ?: "null"
@@ -336,16 +341,22 @@ actual class StringBuilder private constructor (
      */
     actual fun insert(index: Int, value: Any?): StringBuilder = insert(index, value.toString())
 
+    @Deprecated("Provided for binary compatibility.", level = DeprecationLevel.HIDDEN)
+    fun insert(index: Int, value: String): StringBuilder = insert(index, value)
+
     /**
      * Inserts the string [value] into this string builder at the specified [index] and returns this instance.
      *
+     * If [value] is `null`, then the four characters `"null"` are inserted.
+     *
      * @throws IndexOutOfBoundsException if [index] is less than zero or greater than the length of this string builder.
      */
-    actual fun insert(index: Int, value: String): StringBuilder {
+    actual fun insert(index: Int, value: String?): StringBuilder {
+        val toInsert = value ?: "null"
         checkInsertIndex(index)
-        ensureExtraCapacity(value.length)
-        array.copyInto(array, startIndex = index, endIndex = _length, destinationOffset = index + value.length)
-        _length += insertString(array, index, value)
+        ensureExtraCapacity(toInsert.length)
+        array.copyInto(array, startIndex = index, endIndex = _length, destinationOffset = index + toInsert.length)
+        _length += insertString(array, index, toInsert)
         return this
     }
 
@@ -386,8 +397,8 @@ actual class StringBuilder private constructor (
      *
      * @throws IndexOutOfBoundsException if [startIndex] is less than zero or greater than the length of this string builder.
      */
-    @SinceKotlin("1.3")
-    @ExperimentalStdlibApi
+    @SinceKotlin("1.4")
+    @WasExperimental(ExperimentalStdlibApi::class)
     actual fun substring(startIndex: Int): String {
         return substring(startIndex, _length)
     }
@@ -425,8 +436,8 @@ actual class StringBuilder private constructor (
      *
      * @throws IndexOutOfBoundsException or [IllegalArgumentException] if [startIndex] is less than zero, greater than the length of this string builder, or `startIndex > endIndex`.
      */
-    @SinceKotlin("1.3")
-    @ExperimentalStdlibApi
+    @SinceKotlin("1.4")
+    @WasExperimental(ExperimentalStdlibApi::class)
     fun setRange(startIndex: Int, endIndex: Int, value: String): StringBuilder {
         checkReplaceRange(startIndex, endIndex, _length)
 
@@ -450,8 +461,8 @@ actual class StringBuilder private constructor (
      *
      * @throws IndexOutOfBoundsException if [index] is out of bounds of this string builder.
      */
-    @SinceKotlin("1.3")
-    @ExperimentalStdlibApi
+    @SinceKotlin("1.4")
+    @WasExperimental(ExperimentalStdlibApi::class)
     fun deleteAt(index: Int): StringBuilder {
         checkIndex(index)
         array.copyInto(array, startIndex = index + 1, endIndex = _length, destinationOffset = index)
@@ -467,8 +478,8 @@ actual class StringBuilder private constructor (
      *
      * @throws IndexOutOfBoundsException or [IllegalArgumentException] when [startIndex] is out of range of this string builder indices or when `startIndex > endIndex`.
      */
-    @SinceKotlin("1.3")
-    @ExperimentalStdlibApi
+    @SinceKotlin("1.4")
+    @WasExperimental(ExperimentalStdlibApi::class)
     fun deleteRange(startIndex: Int, endIndex: Int): StringBuilder {
         checkReplaceRange(startIndex, endIndex, _length)
 
@@ -490,8 +501,8 @@ actual class StringBuilder private constructor (
      * @throws IndexOutOfBoundsException when the subrange doesn't fit into the [destination] array starting at the specified [destinationOffset],
      *  or when that index is out of the [destination] array indices range.
      */
-    @SinceKotlin("1.3")
-    @ExperimentalStdlibApi
+    @SinceKotlin("1.4")
+    @WasExperimental(ExperimentalStdlibApi::class)
     fun toCharArray(destination: CharArray, destinationOffset: Int = 0, startIndex: Int = 0, endIndex: Int = this.length) {
         checkBoundsIndexes(startIndex, endIndex, _length)
         checkBoundsIndexes(destinationOffset, destinationOffset + endIndex - startIndex, destination.size)
@@ -510,8 +521,8 @@ actual class StringBuilder private constructor (
      *
      * @throws IndexOutOfBoundsException or [IllegalArgumentException] when [startIndex] or [endIndex] is out of range of the [value] array indices or when `startIndex > endIndex`.
      */
-    @SinceKotlin("1.3")
-    @ExperimentalStdlibApi
+    @SinceKotlin("1.4")
+    @WasExperimental(ExperimentalStdlibApi::class)
     fun appendRange(value: CharArray, startIndex: Int, endIndex: Int): StringBuilder {
         checkBoundsIndexes(startIndex, endIndex, value.size)
         val extraLength = endIndex - startIndex
@@ -524,28 +535,25 @@ actual class StringBuilder private constructor (
     /**
      * Appends a subsequence of the specified character sequence [value] to this string builder and returns this instance.
      *
-     * @param value the character sequence from which a subsequence is appended. If [value] is `null`,
-     *  then characters are appended as if [value] contained the four characters `"null"`.
+     * @param value the character sequence from which a subsequence is appended.
      * @param startIndex the beginning (inclusive) of the subsequence to append.
      * @param endIndex the end (exclusive) of the subsequence to append.
      *
      * @throws IndexOutOfBoundsException or [IllegalArgumentException] when [startIndex] or [endIndex] is out of range of the [value] character sequence indices or when `startIndex > endIndex`.
      */
-    @SinceKotlin("1.3")
-    @ExperimentalStdlibApi
-    fun appendRange(value: CharSequence?, startIndex: Int, endIndex: Int): StringBuilder {
-        // Kotlin/JVM processes null as if the argument was "null" char sequence.
-        val toAppend = value ?: "null"
-        checkBoundsIndexes(startIndex, endIndex, toAppend.length)
+    @SinceKotlin("1.4")
+    @WasExperimental(ExperimentalStdlibApi::class)
+    fun appendRange(value: CharSequence, startIndex: Int, endIndex: Int): StringBuilder {
+        checkBoundsIndexes(startIndex, endIndex, value.length)
         val extraLength = endIndex - startIndex
         ensureExtraCapacity(extraLength)
-        (toAppend as? String)?.let {
+        (value as? String)?.let {
             _length += insertString(array, _length, it, startIndex, extraLength)
             return this
         }
         var index = startIndex
         while (index < endIndex)
-            array[_length++] = toAppend[index++]
+            array[_length++] = value[index++]
         return this
     }
 
@@ -555,20 +563,17 @@ actual class StringBuilder private constructor (
      * The inserted characters go in the same order as in the [value] character sequence, starting at [index].
      *
      * @param index the position in this string builder to insert at.
-     * @param value the character sequence from which a subsequence is inserted. If [value] is `null`,
-     *  then characters will be inserted as if [value] contained the four characters `"null"`.
+     * @param value the character sequence from which a subsequence is inserted.
      * @param startIndex the beginning (inclusive) of the subsequence to insert.
      * @param endIndex the end (exclusive) of the subsequence to insert.
      *
      * @throws IndexOutOfBoundsException or [IllegalArgumentException] when [startIndex] or [endIndex] is out of range of the [value] character sequence indices or when `startIndex > endIndex`.
      * @throws IndexOutOfBoundsException if [index] is less than zero or greater than the length of this string builder.
      */
-    @SinceKotlin("1.3")
-    @ExperimentalStdlibApi
-    fun insertRange(index: Int, value: CharSequence?, startIndex: Int, endIndex: Int): StringBuilder {
-        // Kotlin/JVM processes null as if the argument was "null" char sequence.
-        val toInsert = value ?: "null"
-        checkBoundsIndexes(startIndex, endIndex, toInsert.length)
+    @SinceKotlin("1.4")
+    @WasExperimental(ExperimentalStdlibApi::class)
+    fun insertRange(index: Int, value: CharSequence, startIndex: Int, endIndex: Int): StringBuilder {
+        checkBoundsIndexes(startIndex, endIndex, value.length)
         checkInsertIndex(index)
         val extraLength = endIndex - startIndex
         ensureExtraCapacity(extraLength)
@@ -577,7 +582,7 @@ actual class StringBuilder private constructor (
         var from = startIndex
         var to = index
         while (from < endIndex) {
-            array[to++] = toInsert[from++]
+            array[to++] = value[from++]
         }
 
         _length += extraLength
@@ -597,8 +602,8 @@ actual class StringBuilder private constructor (
      * @throws IndexOutOfBoundsException or [IllegalArgumentException] when [startIndex] or [endIndex] is out of range of the [value] array indices or when `startIndex > endIndex`.
      * @throws IndexOutOfBoundsException if [index] is less than zero or greater than the length of this string builder.
      */
-    @SinceKotlin("1.3")
-    @ExperimentalStdlibApi
+    @SinceKotlin("1.4")
+    @WasExperimental(ExperimentalStdlibApi::class)
     fun insertRange(index: Int, value: CharArray, startIndex: Int, endIndex: Int): StringBuilder {
         checkInsertIndex(index)
         checkBoundsIndexes(startIndex, endIndex, value.size)
@@ -665,8 +670,8 @@ public actual inline operator fun StringBuilder.set(index: Int, value: Char): Un
  *
  * @throws IndexOutOfBoundsException or [IllegalArgumentException] if [startIndex] is less than zero, greater than the length of this string builder, or `startIndex > endIndex`.
  */
-@SinceKotlin("1.3")
-@ExperimentalStdlibApi
+@SinceKotlin("1.4")
+@WasExperimental(ExperimentalStdlibApi::class)
 @Suppress("EXTENSION_SHADOWED_BY_MEMBER")
 @kotlin.internal.InlineOnly
 public actual inline fun StringBuilder.setRange(startIndex: Int, endIndex: Int, value: String): StringBuilder =
@@ -681,8 +686,8 @@ public actual inline fun StringBuilder.setRange(startIndex: Int, endIndex: Int, 
  *
  * @throws IndexOutOfBoundsException if [index] is out of bounds of this string builder.
  */
-@SinceKotlin("1.3")
-@ExperimentalStdlibApi
+@SinceKotlin("1.4")
+@WasExperimental(ExperimentalStdlibApi::class)
 @Suppress("EXTENSION_SHADOWED_BY_MEMBER")
 @kotlin.internal.InlineOnly
 public actual inline fun StringBuilder.deleteAt(index: Int): StringBuilder = this.deleteAt(index)
@@ -695,8 +700,8 @@ public actual inline fun StringBuilder.deleteAt(index: Int): StringBuilder = thi
  *
  * @throws IndexOutOfBoundsException or [IllegalArgumentException] when [startIndex] or [endIndex] is out of range of this string builder indices or when `startIndex > endIndex`.
  */
-@SinceKotlin("1.3")
-@ExperimentalStdlibApi
+@SinceKotlin("1.4")
+@WasExperimental(ExperimentalStdlibApi::class)
 @Suppress("EXTENSION_SHADOWED_BY_MEMBER")
 @kotlin.internal.InlineOnly
 public actual inline fun StringBuilder.deleteRange(startIndex: Int, endIndex: Int): StringBuilder = this.deleteRange(startIndex, endIndex)
@@ -713,8 +718,8 @@ public actual inline fun StringBuilder.deleteRange(startIndex: Int, endIndex: In
  * @throws IndexOutOfBoundsException when the subrange doesn't fit into the [destination] array starting at the specified [destinationOffset],
  *  or when that index is out of the [destination] array indices range.
  */
-@SinceKotlin("1.3")
-@ExperimentalStdlibApi
+@SinceKotlin("1.4")
+@WasExperimental(ExperimentalStdlibApi::class)
 @Suppress("EXTENSION_SHADOWED_BY_MEMBER", "ACTUAL_FUNCTION_WITH_DEFAULT_ARGUMENTS")
 @kotlin.internal.InlineOnly
 public actual inline fun StringBuilder.toCharArray(destination: CharArray, destinationOffset: Int = 0, startIndex: Int = 0, endIndex: Int = this.length) =
@@ -731,8 +736,8 @@ public actual inline fun StringBuilder.toCharArray(destination: CharArray, desti
  *
  * @throws IndexOutOfBoundsException or [IllegalArgumentException] when [startIndex] or [endIndex] is out of range of the [value] array indices or when `startIndex > endIndex`.
  */
-@SinceKotlin("1.3")
-@ExperimentalStdlibApi
+@SinceKotlin("1.4")
+@WasExperimental(ExperimentalStdlibApi::class)
 @Suppress("EXTENSION_SHADOWED_BY_MEMBER")
 @kotlin.internal.InlineOnly
 public actual inline fun StringBuilder.appendRange(value: CharArray, startIndex: Int, endIndex: Int): StringBuilder =
@@ -741,18 +746,17 @@ public actual inline fun StringBuilder.appendRange(value: CharArray, startIndex:
 /**
  * Appends a subsequence of the specified character sequence [value] to this string builder and returns this instance.
  *
- * @param value the character sequence from which a subsequence is appended. If [value] is `null`,
- *  then characters are appended as if [value] contained the four characters `"null"`.
+ * @param value the character sequence from which a subsequence is appended.
  * @param startIndex the beginning (inclusive) of the subsequence to append.
  * @param endIndex the end (exclusive) of the subsequence to append.
  *
  * @throws IndexOutOfBoundsException or [IllegalArgumentException] when [startIndex] or [endIndex] is out of range of the [value] character sequence indices or when `startIndex > endIndex`.
  */
-@SinceKotlin("1.3")
-@ExperimentalStdlibApi
+@SinceKotlin("1.4")
+@WasExperimental(ExperimentalStdlibApi::class)
 @Suppress("EXTENSION_SHADOWED_BY_MEMBER")
 @kotlin.internal.InlineOnly
-public actual inline fun StringBuilder.appendRange(value: CharSequence?, startIndex: Int, endIndex: Int): StringBuilder =
+public actual inline fun StringBuilder.appendRange(value: CharSequence, startIndex: Int, endIndex: Int): StringBuilder =
         this.appendRange(value, startIndex, endIndex)
 
 /**
@@ -768,8 +772,8 @@ public actual inline fun StringBuilder.appendRange(value: CharSequence?, startIn
  * @throws IndexOutOfBoundsException or [IllegalArgumentException] when [startIndex] or [endIndex] is out of range of the [value] array indices or when `startIndex > endIndex`.
  * @throws IndexOutOfBoundsException if [index] is less than zero or greater than the length of this string builder.
  */
-@SinceKotlin("1.3")
-@ExperimentalStdlibApi
+@SinceKotlin("1.4")
+@WasExperimental(ExperimentalStdlibApi::class)
 @Suppress("EXTENSION_SHADOWED_BY_MEMBER")
 @kotlin.internal.InlineOnly
 public actual inline fun StringBuilder.insertRange(index: Int, value: CharArray, startIndex: Int, endIndex: Int): StringBuilder =
@@ -781,19 +785,18 @@ public actual inline fun StringBuilder.insertRange(index: Int, value: CharArray,
  * The inserted characters go in the same order as in the [value] character sequence, starting at [index].
  *
  * @param index the position in this string builder to insert at.
- * @param value the character sequence from which a subsequence is inserted. If [value] is `null`,
- *  then characters will be inserted as if [value] contained the four characters `"null"`.
+ * @param value the character sequence from which a subsequence is inserted.
  * @param startIndex the beginning (inclusive) of the subsequence to insert.
  * @param endIndex the end (exclusive) of the subsequence to insert.
  *
  * @throws IndexOutOfBoundsException or [IllegalArgumentException] when [startIndex] or [endIndex] is out of range of the [value] character sequence indices or when `startIndex > endIndex`.
  * @throws IndexOutOfBoundsException if [index] is less than zero or greater than the length of this string builder.
  */
-@SinceKotlin("1.3")
-@ExperimentalStdlibApi
+@SinceKotlin("1.4")
+@WasExperimental(ExperimentalStdlibApi::class)
 @Suppress("EXTENSION_SHADOWED_BY_MEMBER")
 @kotlin.internal.InlineOnly
-public actual inline fun StringBuilder.insertRange(index: Int, value: CharSequence?, startIndex: Int, endIndex: Int): StringBuilder =
+public actual inline fun StringBuilder.insertRange(index: Int, value: CharSequence, startIndex: Int, endIndex: Int): StringBuilder =
         this.insertRange(index, value, startIndex, endIndex)
 
 // Method parameters renamings
@@ -887,10 +890,14 @@ public inline fun StringBuilder.setLength(l: Int) = this.setLength(newLength = l
  * @throws IndexOutOfBoundsException or [IllegalArgumentException] when [start] or [end] is out of range of the [csq] character sequence indices or when `start > end`.
  * @throws IndexOutOfBoundsException if [index] is less than zero or greater than the length of this string builder.
  */
-@UseExperimental(ExperimentalStdlibApi::class)
+@Deprecated(
+        "Use insertRange(index: Int, csq: CharSequence, start: Int, end: Int) instead",
+        ReplaceWith("insertRange(index, csq ?: \"null\", start, end)"),
+        DeprecationLevel.WARNING
+)
 @kotlin.internal.InlineOnly
 public inline fun StringBuilder.insert(index: Int, csq: CharSequence?, start: Int, end: Int): StringBuilder =
-        this.insertRange(index, csq, start, end)
+        this.insertRange(index, csq ?: "null", start, end)
 
 @Deprecated("Use set(index: Int, value: Char) instead", ReplaceWith("set(index, value)"), DeprecationLevel.WARNING)
 @kotlin.internal.InlineOnly
@@ -905,6 +912,6 @@ public inline fun StringBuilder.setCharAt(index: Int, value: Char) = this.set(in
  *
  * @throws IndexOutOfBoundsException if [index] is out of bounds of this string builder.
  */
-@UseExperimental(ExperimentalStdlibApi::class)
+@Deprecated("Use deleteAt(index: Int) instead", ReplaceWith("deleteAt(index)"), DeprecationLevel.WARNING)
 @kotlin.internal.InlineOnly
 public inline fun StringBuilder.deleteCharAt(index: Int) = this.deleteAt(index)

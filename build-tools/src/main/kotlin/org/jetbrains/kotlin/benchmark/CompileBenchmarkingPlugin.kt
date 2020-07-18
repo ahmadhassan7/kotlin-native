@@ -70,7 +70,7 @@ open class CompileBenchmarkingPlugin : Plugin<Project> {
                         isIgnoreExitValue = true
                         konanRun.dependsOn(this)
                         doLast {
-                            exitCodes[name] = execResult.exitValue
+                            exitCodes[name] = execResult!!.exitValue
                         }
                     }
                 }
@@ -85,6 +85,7 @@ open class CompileBenchmarkingPlugin : Plugin<Project> {
 
             doLast {
                 val nativeCompileTime = getCompileBenchmarkTime(
+                    project,
                     applicationName,
                     buildSteps.names,
                     repeatNumber,
